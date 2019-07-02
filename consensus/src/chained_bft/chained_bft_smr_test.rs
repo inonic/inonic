@@ -80,7 +80,7 @@ impl SMRNode {
 
         let config = ChainedBftSMRConfig {
             max_pruned_blocks_in_mem: 10000,
-            pacemaker_initial_timeout: Duration::from_secs(1),
+            pacemaker_initial_timeout: Duration::from_secs(3),
             contiguous_rounds: 2,
             max_block_size: 50,
         };
@@ -303,7 +303,7 @@ fn basic_commit_and_restart() {
 
         for round in 0..num_rounds {
             let _proposals = playground
-                .wait_for_messages(1, NetworkPlayground::exclude_new_round)
+                .wait_for_messages(1, NetworkPlayground::exclude_timeout_msg)
                 .await;
 
             // A proposal is carrying a QC that commits a block of round - 3.
@@ -343,7 +343,7 @@ fn basic_commit_and_restart() {
         // This message is for proposal with round 11 to delivery the QC, but not gather the QC
         // so after restart, proposer will propose round 11 again.
         playground
-            .wait_for_messages(1, NetworkPlayground::exclude_new_round)
+            .wait_for_messages(1, NetworkPlayground::exclude_timeout_msg)
             .await;
     });
     // create a new playground to avoid polling potential vote messages in previous one.
@@ -362,7 +362,7 @@ fn basic_commit_and_restart() {
             // reject round 11 depends on whether it voted for before restart.
             loop {
                 let msg = playground
-                    .wait_for_messages(1, NetworkPlayground::exclude_new_round)
+                    .wait_for_messages(1, NetworkPlayground::exclude_timeout_msg)
                     .await;
                 if msg[0].1.has_vote() {
                     round += 1;
