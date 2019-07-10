@@ -71,5 +71,6 @@ Our team members are all fanatical crypto-currency fans.We have enough money to 
 
 ## Other link
 
+[Milestone](https://github.com/inonic/inonic/tree/master/_inonic_new/milestone)
 
 ## ``New era is coming,let us sailing. ``
