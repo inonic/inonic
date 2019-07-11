@@ -92,7 +92,7 @@ impl LibraDB {
             (EVENT_ACCUMULATOR_CF_NAME, ColumnFamilyOptions::default()),
             (EVENT_BY_ACCESS_PATH_CF_NAME, ColumnFamilyOptions::default()),
             (EVENT_CF_NAME, ColumnFamilyOptions::default()),
-            (SIGNATURE_CF_NAME, ColumnFamilyOptions::default()),
+            (RETIRED_STATE_RECORD_CF_NAME, ColumnFamilyOptions::default()),
             (SIGNED_TRANSACTION_CF_NAME, ColumnFamilyOptions::default()),
             (STATE_MERKLE_NODE_CF_NAME, ColumnFamilyOptions::default()),
             (
@@ -337,14 +337,15 @@ impl LibraDB {
                 .state_root_hash()
         };
 
+        let last_version = first_version + num_txns - 1;
         if let Some(x) = ledger_info_with_sigs {
-            let last_version = x.ledger_info().version();
+            let claimed_last_version = x.ledger_info().version();
             ensure!(
-                first_version + num_txns - 1 == last_version,
+                claimed_last_version == last_version,
                 "Transaction batch not applicable: first_version {}, num_txns {}, last_version {}",
                 first_version,
                 num_txns,
-                last_version
+                claimed_last_version,
             );
         }
 
@@ -375,6 +376,7 @@ impl LibraDB {
         self.commit(batch)?;
         // Only increment counter if commit(batch) succeeds.
         OP_COUNTER.inc_by("committed_txns", txns_to_commit.len());
+        OP_COUNTER.set("latest_transaction_version", last_version as usize);
         Ok(())
     }
 
@@ -394,6 +396,7 @@ impl LibraDB {
             .collect::<Vec<_>>();
         let state_root_hashes = self.state_store.put_account_state_sets(
             account_state_sets,
+            first_version,
             cur_state_root_hash,
             &mut batch,
         )?;

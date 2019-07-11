@@ -78,13 +78,6 @@ where
             allocator,
             ..
         } = process_txn;
-        let txn = match txn.check_signature() {
-            Ok(txn) => txn,
-            Err(_) => {
-                error!("[VM] Invalid signature");
-                return Err(VMStatus::Validation(VMValidationStatus::InvalidSignature));
-            }
-        };
 
         let txn_state = match txn.payload() {
             TransactionPayload::Program(program) => {
@@ -299,7 +292,7 @@ where
     fn new(
         metadata: TransactionMetadata,
         module_cache: P,
-        data_cache: &'txn RemoteCache,
+        data_cache: &'txn dyn RemoteCache,
         allocator: &'txn Arena<LoadedModule>,
     ) -> Self {
         // This temporary cache is used for modules published by a single transaction.

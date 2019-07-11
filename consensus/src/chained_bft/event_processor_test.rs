@@ -32,7 +32,7 @@ use crate::{
         },
     },
     state_replication::ExecutedState,
-    time_service::{ClockTimeService, TimeService},
+    util::time_service::{ClockTimeService, TimeService},
 };
 use channel;
 use crypto::HashValue;
@@ -97,8 +97,8 @@ impl NodeSetup {
     fn create_pacemaker(
         executor: TaskExecutor,
         time_service: Arc<dyn TimeService>,
-    ) -> (Arc<Pacemaker>, channel::Receiver<NewRoundEvent>) {
-        let base_timeout = Duration::new(5, 0);
+    ) -> (Arc<dyn Pacemaker>, channel::Receiver<NewRoundEvent>) {
+        let base_timeout = Duration::new(60, 0);
         let time_interval = Box::new(ExponentialTimeInterval::fixed(base_timeout));
         let highest_certified_round = 0;
         let (new_round_events_sender, new_round_events_receiver) = channel::new_test(1_024);
@@ -726,10 +726,15 @@ fn process_votes_basic_test() {
         node.block_store.signer(),
     );
     block_on(async move {
-        node.event_processor.process_vote(vote_msg, 1).await;
+        // This is 'kick off' event from pacemaker initialization
         let new_round_event = node.new_rounds_receiver.next().await.unwrap();
         assert_eq!(new_round_event.reason, NewRoundReason::QCReady);
-        assert_eq!(new_round_event.round, a1.round());
+        assert_eq!(new_round_event.round, 1);
+        node.event_processor.process_vote(vote_msg, 1).await;
+        let new_round_event = node.new_rounds_receiver.next().await.unwrap();
+        // This is event from processing qc for round 1
+        assert_eq!(new_round_event.reason, NewRoundReason::QCReady);
+        assert_eq!(new_round_event.round, 2);
     });
     block_on(runtime.shutdown_now().compat()).unwrap();
 }

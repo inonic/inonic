@@ -117,8 +117,7 @@ impl ClientProxy {
         );
         // Total 3f + 1 validators, 2f + 1 correct signatures are required.
         // If < 4 validators, all validators have to agree.
-        let quorum_size = validators.len() * 2 / 3 + 1;
-        let validator_verifier = Arc::new(ValidatorVerifier::new(validators, quorum_size));
+        let validator_verifier = Arc::new(ValidatorVerifier::new(validators));
         let client = GRPCClient::new(host, ac_port, validator_verifier)?;
 
         let accounts = vec![];
@@ -461,7 +460,7 @@ impl ClientProxy {
             let signer_account = self.accounts.get(signer_account_ref_id).ok_or_else(|| {
                 format_err!("Unable to find sender account: {}", signer_account_ref_id)
             })?;
-            let signer: Box<&TransactionSigner> = match &signer_account.key_pair {
+            let signer: Box<&dyn TransactionSigner> = match &signer_account.key_pair {
                 Some(key_pair) => Box::new(key_pair),
                 None => Box::new(&self.wallet),
             };
@@ -901,14 +900,14 @@ impl ClientProxy {
     }
 
     /// Craft a transaction request.
-    pub fn create_submit_transaction_req(
+    fn create_submit_transaction_req(
         &self,
         program: Program,
         sender_account: &AccountData,
         max_gas_amount: Option<u64>,
         gas_unit_price: Option<u64>,
     ) -> Result<SubmitTransactionRequest> {
-        let signer: Box<&TransactionSigner> = match &sender_account.key_pair {
+        let signer: Box<&dyn TransactionSigner> = match &sender_account.key_pair {
             Some(key_pair) => Box::new(key_pair),
             None => Box::new(&self.wallet),
         };
