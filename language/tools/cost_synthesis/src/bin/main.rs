@@ -14,6 +14,7 @@ use cost_synthesis::{
     with_loaded_vm,
 };
 use csv;
+use language_e2e_tests::data_store::FakeDataStore;
 use move_ir_natives::hash;
 use std::{collections::HashMap, convert::TryFrom, path::Path, time::Instant, u64};
 use vm::{
@@ -30,7 +31,6 @@ use vm_runtime::{
     loaded_data::function::{FunctionRef, FunctionReference},
     txn_executor::TransactionExecutor,
 };
-use vm_runtime_tests::data_store::FakeDataStore;
 
 const MAX_STACK_SIZE: u64 = 100;
 const NUM_ITERS: u16 = 10000;
@@ -89,7 +89,7 @@ fn stack_instructions() {
         Gt,
         Le,
         Ge,
-        Assert,
+        Abort,
         LdFalse,
         LdTrue,
         LdConst(0),
@@ -136,20 +136,19 @@ fn stack_instructions() {
                     let before = Instant::now();
                     let ignore = vm.execute_block(&[instr], 0);
                     let time = before.elapsed().as_nanos();
-                    // Check to make sure we didn't error. Need to special case the assertion
-                    // bytecode.
-                    if instruction != Bytecode::Assert {
+                    // Check to make sure we didn't error. Need to special case the abort bytecode.
+                    if instruction != Bytecode::Abort {
                         // We want any errors here to bubble up to us with the actual VM error.
                         ignore.unwrap().unwrap();
                     } else {
-                        // In the case of the Assert bytecode we want to only make sure that we
+                        // In the case of the Abort bytecode we want to only make sure that we
                         // don't have a VMInvariantViolation error, and then make sure that the any
-                        // error generated was an assertion failure.
+                        // error generated was an abort failure.
                         match ignore.unwrap() {
                             Ok(_) => (),
                             Err(err) => match err.err {
-                                VMErrorKind::AssertionFailure(_) => (),
-                                _ => panic!("Assertion bytecode failed"),
+                                VMErrorKind::Aborted(_) => (),
+                                _ => panic!("Abort bytecode failed"),
                             },
                         }
                     }
