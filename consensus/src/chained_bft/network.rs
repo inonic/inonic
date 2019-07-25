@@ -27,6 +27,7 @@ use network::{
     proto::{BlockRetrievalStatus, ConsensusMsg, RequestBlock, RespondBlock, RespondChunk},
     validator_network::{ConsensusNetworkEvents, ConsensusNetworkSender, Event, RpcError},
 };
+use nextgen_crypto::ed25519::*;
 use proto_conv::{FromProto, IntoProto};
 use protobuf::Message;
 use std::{
@@ -36,7 +37,7 @@ use std::{
 use tokio::runtime::TaskExecutor;
 use types::{transaction::TransactionListWithProof, validator_verifier::ValidatorVerifier};
 
-/// The response sent back from event_processor for the BlockRetrievalRequest.
+/// The response sent back from EventProcessor for the BlockRetrievalRequest.
 #[derive(Debug)]
 pub struct BlockRetrievalResponse<T> {
     pub status: BlockRetrievalStatus,
@@ -109,7 +110,7 @@ pub struct ConsensusNetworkImpl {
     self_sender: channel::Sender<Result<Event<ConsensusMsg>, failure::Error>>,
     self_receiver: Option<channel::Receiver<Result<Event<ConsensusMsg>, failure::Error>>>,
     peers: Arc<Vec<Author>>,
-    validator: Arc<ValidatorVerifier>,
+    validator: Arc<ValidatorVerifier<Ed25519PublicKey>>,
 }
 
 impl Clone for ConsensusNetworkImpl {
@@ -132,7 +133,7 @@ impl ConsensusNetworkImpl {
         network_sender: ConsensusNetworkSender,
         network_events: ConsensusNetworkEvents,
         peers: Arc<Vec<Author>>,
-        validator: Arc<ValidatorVerifier>,
+        validator: Arc<ValidatorVerifier<Ed25519PublicKey>>,
     ) -> Self {
         let (self_sender, self_receiver) = channel::new(1_024, &counters::PENDING_SELF_MESSAGES);
         ConsensusNetworkImpl {
@@ -317,7 +318,7 @@ struct NetworkTask<T, P, S> {
     chunk_request_tx: channel::Sender<ChunkRetrievalRequest>,
     timeout_msg_tx: channel::Sender<TimeoutMsg>,
     all_events: S,
-    validator: Arc<ValidatorVerifier>,
+    validator: Arc<ValidatorVerifier<Ed25519PublicKey>>,
 }
 
 impl<T, P, S> NetworkTask<T, P, S>
