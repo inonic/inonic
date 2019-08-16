@@ -13,7 +13,7 @@ COPY rust-toolchain /libra/rust-toolchain
 RUN rustup install $(cat rust-toolchain)
 
 COPY . /libra
-RUN cargo build --release -p client
+RUN cargo build --release -p libra_node -p client -p benchmark
 RUN strip target/release/client
 
 ### Production Image ###

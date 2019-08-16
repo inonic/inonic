@@ -131,7 +131,7 @@ fn run_transaction(
         1,
         Duration::from_secs(u64::max_value()),
     )
-    .sign(&account.privkey, account.pubkey)?
+    .sign(&account.privkey, account.pubkey.clone())?
     .into_inner();
 
     let mut outputs = exec.execute_block(vec![transaction]);
@@ -151,7 +151,7 @@ fn run_transaction(
 fn run_serializer_round_trip(program: &CompiledProgram) -> Result<()> {
     let (script_blob, module_blobs) = serialize_program(program)?;
 
-    assert!(module_blobs.len() == program.modules.len());
+    assert_eq!(module_blobs.len(), program.modules.len());
 
     let script = CompiledScript::deserialize(&script_blob)?;
     if script != program.script {

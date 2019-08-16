@@ -18,6 +18,10 @@ use vm::{
     views::{ModuleView, ViewInternals},
     IndexKind,
 };
+use vm_runtime_types::{
+    native_functions::dispatch::dispatch_native_function,
+    native_structs::dispatch::dispatch_native_struct,
+};
 
 /// A program that has been verified for internal consistency.
 ///
@@ -63,13 +67,13 @@ impl<'a> VerifiedProgram<'a> {
                 }
             };
 
-            let (module, errors) = {
+            {
                 // Verify against any modules compiled earlier as well.
                 let deps = deps.iter().copied().chain(&modules);
-                verify_module_dependencies(module, deps)
-            };
-            if !errors.is_empty() {
-                return Err(to_statuses(errors));
+                let errors = verify_module_dependencies(&module, deps);
+                if !errors.is_empty() {
+                    return Err(to_statuses(errors));
+                }
             }
 
             modules.push(module);
@@ -89,12 +93,12 @@ impl<'a> VerifiedProgram<'a> {
             }
         };
 
-        let (script, errors) = {
+        {
             let deps = deps.iter().copied().chain(&modules);
-            verify_script_dependencies(script, deps)
-        };
-        if !errors.is_empty() {
-            return Err(to_statuses(errors));
+            let errors = verify_script_dependencies(&script, deps);
+            if !errors.is_empty() {
+                return Err(to_statuses(errors));
+            }
         }
 
         Ok(VerifiedProgram {
@@ -332,9 +336,9 @@ pub fn verify_main_signature(script: &CompiledScript) -> Vec<VMStaticViolation> 
 /// dependency in 'module' is checked against the declarations in the found module and mismatch
 /// errors are returned.
 pub fn verify_module_dependencies<'a>(
-    module: VerifiedModule,
+    module: &VerifiedModule,
     dependencies: impl IntoIterator<Item = &'a VerifiedModule>,
-) -> (VerifiedModule, Vec<VerificationError>) {
+) -> Vec<VerificationError> {
     let module_id = module.self_id();
     let mut dependency_map = BTreeMap::new();
     for dependency in dependencies {
@@ -344,7 +348,7 @@ pub fn verify_module_dependencies<'a>(
         }
     }
     let mut errors = vec![];
-    let module_view = ModuleView::new(&module);
+    let module_view = ModuleView::new(module);
     errors.append(&mut verify_struct_kind(&module_view, &dependency_map));
     errors.append(&mut verify_function_visibility_and_type(
         &module_view,
@@ -354,7 +358,9 @@ pub fn verify_module_dependencies<'a>(
         &module_view,
         &dependency_map,
     ));
-    (module, errors)
+    errors.append(&mut verify_native_functions(&module_view));
+    errors.append(&mut verify_native_structs(&module_view));
+    errors
 }
 
 /// Verifying the dependencies of a script follows the same recipe as `VerifiedScript::new`
@@ -363,15 +369,87 @@ pub fn verify_module_dependencies<'a>(
 /// If found, usage of types and functions of the dependency in 'script' is checked against the
 /// declarations in the found module and mismatch errors are returned.
 pub fn verify_script_dependencies<'a>(
-    script: VerifiedScript,
+    script: &VerifiedScript,
     dependencies: impl IntoIterator<Item = &'a VerifiedModule>,
-) -> (VerifiedScript, Vec<VerificationError>) {
-    let fake_module = script.into_module();
-    let (fake_module, errors) = verify_module_dependencies(fake_module, dependencies);
-    // We just converted the script into a module so this doesn't break any invariants, even though
-    // not every VerifiedModule is a VerifiedScript.
-    let script = VerifiedScript(fake_module.into_inner().into_script());
-    (script, errors)
+) -> Vec<VerificationError> {
+    let fake_module = script.clone().into_module();
+    verify_module_dependencies(&fake_module, dependencies)
+}
+
+fn verify_native_functions(module_view: &ModuleView<VerifiedModule>) -> Vec<VerificationError> {
+    let mut errors = vec![];
+
+    let module_id = module_view.id();
+    for (idx, native_function_definition_view) in module_view
+        .functions()
+        .enumerate()
+        .filter(|fdv| fdv.1.is_native())
+    {
+        let function_name = native_function_definition_view.name();
+        match dispatch_native_function(&module_id, function_name) {
+            None => errors.push(VerificationError {
+                kind: IndexKind::FunctionHandle,
+                idx,
+                err: VMStaticViolation::MissingDependency,
+            }),
+            Some(vm_native_function) => {
+                let declared_function_signature =
+                    native_function_definition_view.signature().as_inner();
+                let expected_function_signature = &vm_native_function.expected_signature;
+                if declared_function_signature != expected_function_signature {
+                    errors.push(VerificationError {
+                        kind: IndexKind::FunctionHandle,
+                        idx,
+                        err: VMStaticViolation::TypeMismatch,
+                    })
+                }
+            }
+        }
+    }
+    errors
+}
+
+fn verify_native_structs(module_view: &ModuleView<VerifiedModule>) -> Vec<VerificationError> {
+    let mut errors = vec![];
+
+    let module_id = module_view.id();
+    for (idx, native_struct_definition_view) in module_view
+        .structs()
+        .enumerate()
+        .filter(|sdv| sdv.1.is_native())
+    {
+        let struct_name = native_struct_definition_view.name();
+
+        match dispatch_native_struct(&module_id, struct_name) {
+            None => errors.push(VerificationError {
+                kind: IndexKind::StructHandle,
+                idx,
+                err: VMStaticViolation::MissingDependency,
+            }),
+            Some(vm_native_struct) => {
+                let declared_index = idx as u16;
+                let declared_is_nominal_resource =
+                    native_struct_definition_view.is_nominal_resource();
+                let declared_type_parameters =
+                    native_struct_definition_view.type_parameter_constraints();
+
+                let expected_index = vm_native_struct.expected_index.0;
+                let expected_is_nominal_resource = vm_native_struct.expected_nominal_resource;
+                let expected_type_parameters = &vm_native_struct.expected_type_parameters;
+                if declared_index != expected_index
+                    || declared_is_nominal_resource != expected_is_nominal_resource
+                    || declared_type_parameters != expected_type_parameters
+                {
+                    errors.push(VerificationError {
+                        kind: IndexKind::StructHandle,
+                        idx,
+                        err: VMStaticViolation::TypeMismatch,
+                    })
+                }
+            }
+        }
+    }
+    errors
 }
 
 fn verify_all_dependencies_provided(
@@ -408,7 +486,11 @@ fn verify_struct_kind(
         let owner_module = &dependency_map[&owner_module_id];
         let owner_module_view = ModuleView::new(*owner_module);
         if let Some(struct_definition_view) = owner_module_view.struct_definition(struct_name) {
-            if struct_handle_view.is_resource() != struct_definition_view.is_resource() {
+            if struct_handle_view.is_nominal_resource()
+                != struct_definition_view.is_nominal_resource()
+                || struct_handle_view.type_parameter_constraints()
+                    != struct_definition_view.type_parameter_constraints()
+            {
                 errors.push(VerificationError {
                     kind: IndexKind::StructHandle,
                     idx,

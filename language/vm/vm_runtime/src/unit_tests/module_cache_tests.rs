@@ -43,6 +43,7 @@ fn test_module(name: String) -> VerifiedModule {
             FunctionDefinition {
                 function: FunctionHandleIndex::new(0),
                 flags: CodeUnit::PUBLIC,
+                acquires_global_resources: vec![],
                 code: CodeUnit {
                     max_stack_size: 10,
                     locals: LocalsSignatureIndex::new(0),
@@ -52,6 +53,7 @@ fn test_module(name: String) -> VerifiedModule {
             FunctionDefinition {
                 function: FunctionHandleIndex::new(1),
                 flags: CodeUnit::PUBLIC,
+                acquires_global_resources: vec![],
                 code: CodeUnit {
                     max_stack_size: 10,
                     locals: LocalsSignatureIndex::new(0),
@@ -64,12 +66,12 @@ fn test_module(name: String) -> VerifiedModule {
             FunctionSignature {
                 return_types: vec![],
                 arg_types: vec![],
-                kind_constraints: vec![],
+                type_parameters: vec![],
             },
             FunctionSignature {
                 return_types: vec![],
                 arg_types: vec![SignatureToken::U64],
-                kind_constraints: vec![],
+                type_parameters: vec![],
             },
         ],
         locals_signatures: vec![LocalsSignature(vec![])],
@@ -87,6 +89,7 @@ fn test_script() -> VerifiedScript {
         main: FunctionDefinition {
             function: FunctionHandleIndex::new(0),
             flags: CodeUnit::PUBLIC,
+            acquires_global_resources: vec![],
             code: CodeUnit {
                 max_stack_size: 10,
                 locals: LocalsSignatureIndex(0),
@@ -126,12 +129,12 @@ fn test_script() -> VerifiedScript {
             FunctionSignature {
                 return_types: vec![],
                 arg_types: vec![],
-                kind_constraints: vec![],
+                type_parameters: vec![],
             },
             FunctionSignature {
                 return_types: vec![],
                 arg_types: vec![SignatureToken::U64],
-                kind_constraints: vec![],
+                type_parameters: vec![],
             },
         ],
         locals_signatures: vec![LocalsSignature(vec![])],
@@ -364,6 +367,7 @@ fn test_multi_level_cache_write_back() {
         main: FunctionDefinition {
             function: FunctionHandleIndex::new(0),
             flags: CodeUnit::PUBLIC,
+            acquires_global_resources: vec![],
             code: CodeUnit {
                 max_stack_size: 10,
                 locals: LocalsSignatureIndex(0),
@@ -413,12 +417,12 @@ fn test_multi_level_cache_write_back() {
             FunctionSignature {
                 return_types: vec![],
                 arg_types: vec![],
-                kind_constraints: vec![],
+                type_parameters: vec![],
             },
             FunctionSignature {
                 return_types: vec![],
                 arg_types: vec![SignatureToken::U64],
-                kind_constraints: vec![],
+                type_parameters: vec![],
             },
         ],
         locals_signatures: vec![LocalsSignature(vec![])],
@@ -516,7 +520,7 @@ fn test_same_module_struct_resolution() {
         modules:
         module M1 {
             struct X {}
-            struct T { i: u64, x: V#Self.X }
+            struct T { i: u64, x: Self.X }
         }
         script:
         main() {
@@ -566,7 +570,7 @@ fn test_multi_module_struct_resolution() {
         }}
         module M2 {{
             import 0x{0}.M1;
-            struct T {{ i: u64, x: V#M1.X }}
+            struct T {{ i: u64, x: M1.X }}
         }}
         script:
         main() {{
@@ -609,7 +613,7 @@ fn test_field_offset_resolution() {
         modules:
         module M1 {
             struct X { f: u64, g: bool}
-            struct T { i: u64, x: V#Self.X, y: u64 }
+            struct T { i: u64, x: Self.X, y: u64 }
         }
         script:
         main() {
@@ -657,11 +661,11 @@ fn test_dependency_fails_verification() {
     modules:
     module Test {
         resource R1 { }
-        struct S1 { r1: R#Self.R1 }
+        struct S1 { r1: Self.R1 }
 
-        public new_S1(): V#Self.S1 {
-            let s: V#Self.S1;
-            let r: R#Self.R1;
+        public new_S1(): Self.S1 {
+            let s: Self.S1;
+            let r: Self.R1;
             r = R1 {};
             s = S1 { r1: move(r) };
             return move(s);

@@ -3,36 +3,38 @@
 
 use admission_control_proto::proto::{
     admission_control::{
-        AdmissionControlStatusCode, SubmitTransactionRequest,
-        SubmitTransactionResponse as ProtoSubmitTransactionResponse,
+        AdmissionControlStatusCode, SubmitTransactionResponse as ProtoSubmitTransactionResponse,
     },
     admission_control_grpc::AdmissionControlClient,
 };
-use client::{AccountData, AccountStatus};
+use client::AccountStatus;
 use failure::prelude::*;
 use futures::{
     stream::{self, Stream},
     Future,
 };
-use grpcio::{self, CallOption};
+use grpcio::{self, CallOption, Error};
 use logger::prelude::*;
 use proto_conv::{FromProto, IntoProto};
-use std::{collections::HashMap, slice::Chunks, thread, time};
+use protobuf::Message;
+use std::{collections::HashMap, marker::Send, slice::Chunks, thread, time};
 use types::{
     account_address::AccountAddress,
     account_config::get_account_resource_or_default,
     get_with_proof::{RequestItem, ResponseItem, UpdateToLatestLedgerRequest},
+    proto::get_with_proof::UpdateToLatestLedgerResponse,
 };
 
-use crate::OP_COUNTER;
+use crate::{
+    load_generator::{Request, TXN_EXPIRATION},
+    submit_rate::ConstantRate,
+    OP_COUNTER,
+};
 
 /// Timeout duration for grpc call option.
 const GRPC_TIMEOUT_MS: u64 = 8_000;
 /// Duration to sleep between consecutive queries for accounts' sequence numbers.
 const QUERY_SEQUENCE_NUMBERS_INTERVAL_US: u64 = 100;
-/// Max number of iterations to wait (using accounts' sequence number) for submitted
-/// TXNs to become committed.
-pub const MAX_WAIT_COMMIT_ITERATIONS: u64 = 10_000;
 
 /// Return a parameter that controls how "patient" AC clients are,
 /// who are waiting the response from AC for this amount of time.
@@ -66,49 +68,60 @@ fn check_ac_response(resp: &ProtoSubmitTransactionResponse) -> bool {
             true
         } else {
             OP_COUNTER.inc(&format!("submit_txns.{:?}", status));
-            error!("Request rejected by AC: {:?}", resp);
+            debug!("Request rejected by AC: {:?}", resp);
             false
         }
     } else if resp.has_vm_status() {
         OP_COUNTER.inc(&format!("submit_txns.{:?}", resp.get_vm_status()));
-        error!("Request causes error on VM: {:?}", resp);
+        debug!("Request causes error on VM: {:?}", resp);
         false
     } else if resp.has_mempool_status() {
         OP_COUNTER.inc(&format!(
             "submit_txns.{:?}",
             resp.get_mempool_status().get_code()
         ));
-        error!("Request causes error on mempool: {:?}", resp);
+        debug!("Request causes error on mempool: {:?}", resp);
         false
     } else {
         OP_COUNTER.inc("submit_txns.Unknown");
-        error!("Request rejected by AC for unknown error: {:?}", resp);
+        debug!("Request rejected by AC for unknown error: {:?}", resp);
         false
     }
 }
 
-/// Send TXN requests to AC async, wait for and check the responses from AC.
-/// Return the responses of only accepted TXN requests.
-/// Ignore but count both gRPC-failed submissions and AC-rejected TXNs.
-pub fn submit_and_wait_txn_requests(
-    client: &AdmissionControlClient,
-    txn_requests: &[SubmitTransactionRequest],
-) -> Vec<ProtoSubmitTransactionResponse> {
-    let futures: Vec<_> = txn_requests
-        .iter()
-        .filter_map(|req| {
-            match client.submit_transaction_async_opt(&req, get_default_grpc_call_option()) {
-                Ok(future) => Some(future),
+/// Process read requests' responses in a separate thread.
+fn wait_read_requests<
+    T: 'static + Future<Item = UpdateToLatestLedgerResponse, Error = Error> + Send,
+>(
+    read_futures: Vec<T>,
+) {
+    let read_stream = stream::futures_unordered(read_futures);
+    std::thread::spawn(move || {
+        for response_result in read_stream.wait() {
+            match response_result {
+                Ok(proto_resp) => {
+                    let resp_size = f64::from(proto_resp.compute_size());
+                    OP_COUNTER.observe("read_requests.response_bytes", resp_size);
+                    debug!(
+                        "Received {:?} bytes of UpdateToLatestLedgerResponse",
+                        resp_size
+                    );
+                }
                 Err(e) => {
-                    OP_COUNTER.inc(&format!("submit_txns.{:?}", e));
-                    error!("Failed to send gRPC request: {:?}", e);
-                    None
+                    OP_COUNTER.inc(&format!("submit_read_requests.{:?}", e));
+                    debug!("Failed to receive UpdateToLatestLedgerResponse: {:?}", e);
                 }
             }
-        })
-        .collect();
-    // Wait all the futures unorderedly, then pick only accepted responses.
-    stream::futures_unordered(futures)
+        }
+    });
+}
+
+/// Wait and exam responses from AC and return only accepted responses.
+/// TODO: only return #accepted TXNs since main thread only used length of the current ret value.
+fn wait_write_requests(
+    write_futures: Vec<impl Future<Item = ProtoSubmitTransactionResponse, Error = Error>>,
+) -> Vec<ProtoSubmitTransactionResponse> {
+    stream::futures_unordered(write_futures)
         .wait()
         .filter_map(|future_result| match future_result {
             Ok(proto_resp) => {
@@ -120,11 +133,54 @@ pub fn submit_and_wait_txn_requests(
             }
             Err(e) => {
                 OP_COUNTER.inc(&format!("submit_txns.{:?}", e));
-                error!("Failed to receive gRPC response: {:?}", e);
+                debug!("Failed to receive gRPC response: {:?}", e);
                 None
             }
         })
         .collect()
+}
+
+/// Send requests using specified rate to AC async,
+/// wait for and check the responses (currently only for write requests).
+/// Return only the responses of accepted TXNs.
+/// Ignore but count both gRPC-failed submissions and AC-rejected requests.
+pub fn submit_and_wait_requests(
+    client: &AdmissionControlClient,
+    requests: Vec<Request>,
+    submit_rate: u64,
+) -> Vec<ProtoSubmitTransactionResponse> {
+    let mut read_futures = vec![];
+    let mut write_futures = vec![];
+    for request in ConstantRate::new(submit_rate, requests.into_iter()) {
+        match request {
+            Request::WriteRequest(txn_req) => {
+                match client.submit_transaction_async_opt(&txn_req, get_default_grpc_call_option())
+                {
+                    Ok(future) => write_futures.push(future),
+                    Err(e) => {
+                        OP_COUNTER.inc(&format!("submit_txns.{:?}", e));
+                        debug!("Failed to send gRPC request: {:?}", e);
+                    }
+                }
+            }
+            Request::ReadRequest(read_req) => {
+                match client
+                    .update_to_latest_ledger_async_opt(&read_req, get_default_grpc_call_option())
+                {
+                    Ok(future) => read_futures.push(future),
+                    Err(e) => {
+                        OP_COUNTER.inc(&format!("submit_read_requests.{:?}", e));
+                        debug!("Failed to send gRPC request: {:?}", e);
+                    }
+                }
+            }
+        }
+        OP_COUNTER.inc("submit_requests");
+    }
+    // Spawn thread for read requests first and main thread won't join/blocked by this thread.
+    wait_read_requests(read_futures);
+    // Wait all the write futures unorderedly, then pick only accepted responses.
+    wait_write_requests(write_futures)
 }
 
 /// ------------------------------------------------------------ ///
@@ -183,7 +239,7 @@ pub fn get_account_states(
         .filter_map(|address| match get_account_state_async(client, *address) {
             Ok(future) => Some(future),
             Err(e) => {
-                error!("Failed to send account request: {:?}", e);
+                debug!("Failed to send account request: {:?}", e);
                 None
             }
         })
@@ -202,11 +258,11 @@ pub fn get_account_states(
                     states.insert(address, (sequence_number, status));
                 }
                 Err(e) => {
-                    error!("Invalid account response for {:?}: {:?}", address, e);
+                    debug!("Invalid account response for {:?}: {:?}", address, e);
                 }
             },
             Err(e) => {
-                error!("Failed to receive account response: {:?}", e);
+                debug!("Failed to receive account response: {:?}", e);
             }
         }
     }
@@ -219,20 +275,21 @@ pub fn get_account_states(
 /// Return sender accounts' most recent persisted sequence numbers.
 pub fn sync_account_sequence_number(
     client: &AdmissionControlClient,
-    senders: &[AccountData],
+    senders_and_sequence_numbers: &[(AccountAddress, u64)],
 ) -> HashMap<AccountAddress, u64> {
     // Invariants for the keys in targets (T), unfinished (U) and finished (F):
     // (1) T = U union F, and (2) U and F are disjoint.
-    let targets: HashMap<AccountAddress, u64> = senders
+    let targets: HashMap<AccountAddress, u64> =
+        senders_and_sequence_numbers.iter().cloned().collect();
+    let mut unfinished: HashMap<AccountAddress, u64> = senders_and_sequence_numbers
         .iter()
-        .map(|sender| (sender.address, sender.sequence_number))
+        .map(|(sender, _)| (*sender, 0))
         .collect();
-    let mut unfinished: HashMap<AccountAddress, u64> =
-        senders.iter().map(|sender| (sender.address, 0)).collect();
     let mut finished = HashMap::new();
-
-    let mut num_iters = 0;
-    while num_iters < MAX_WAIT_COMMIT_ITERATIONS {
+    // We start to wait when all TXNs are submitted.
+    // So the longest reasonable waiting duration is the duration until the last TXN expired.
+    let start_wait = time::Instant::now();
+    while start_wait.elapsed().as_secs() < TXN_EXPIRATION as u64 {
         let unfinished_addresses: Vec<_> = unfinished.keys().copied().collect();
         let states = get_account_states(client, &unfinished_addresses);
         for (address, (sequence_number, _status)) in states.iter() {
@@ -251,13 +308,12 @@ pub fn sync_account_sequence_number(
                 }
             }
         }
-        if finished.len() == senders.len() {
+        if finished.len() == senders_and_sequence_numbers.len() {
             break;
         }
         thread::sleep(time::Duration::from_micros(
             QUERY_SEQUENCE_NUMBERS_INTERVAL_US,
         ));
-        num_iters += 1;
     }
     // Merging won't have conflict because F and U are disjoint.
     finished.extend(unfinished);

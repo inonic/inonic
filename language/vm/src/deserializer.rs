@@ -442,13 +442,13 @@ fn load_struct_handles(
         }
         let module_handle = read_uleb_u16_internal(&mut cursor)?;
         let name = read_uleb_u16_internal(&mut cursor)?;
-        let kind = load_kind(&mut cursor)?;
-        let kind_constraints = load_kinds(&mut cursor)?;
+        let is_nominal_resource = load_nominal_resource_flag(&mut cursor)?;
+        let type_parameters = load_kinds(&mut cursor)?;
         struct_handles.push(StructHandle {
             module: ModuleHandleIndex(module_handle),
             name: StringPoolIndex(name),
-            kind,
-            kind_constraints,
+            is_nominal_resource,
+            type_parameters,
         });
     }
     Ok(())
@@ -610,11 +610,11 @@ fn load_function_signatures(
             let token = load_signature_token(&mut cursor)?;
             args_signature.push(token);
         }
-        let kind_constraints = load_kinds(&mut cursor)?;
+        let type_parameters = load_kinds(&mut cursor)?;
         function_signatures.push(FunctionSignature {
             return_types: returns_signature,
             arg_types: args_signature,
-            kind_constraints,
+            type_parameters,
         });
     }
     Ok(())
@@ -689,12 +689,24 @@ fn load_signature_tokens(cursor: &mut Cursor<&[u8]>) -> BinaryLoaderResult<Vec<S
     Ok(tokens)
 }
 
+fn load_nominal_resource_flag(cursor: &mut Cursor<&[u8]>) -> BinaryLoaderResult<bool> {
+    if let Ok(byte) = cursor.read_u8() {
+        Ok(match SerializedNominalResourceFlag::from_u8(byte)? {
+            SerializedNominalResourceFlag::NOMINAL_RESOURCE => true,
+            SerializedNominalResourceFlag::NORMAL_STRUCT => false,
+        })
+    } else {
+        Err(BinaryError::Malformed)
+    }
+}
+
 fn load_kind(cursor: &mut Cursor<&[u8]>) -> BinaryLoaderResult<Kind> {
     if let Ok(byte) = cursor.read_u8() {
-        match SerializedKind::from_u8(byte)? {
-            SerializedKind::RESOURCE => Ok(Kind::Resource),
-            SerializedKind::COPYABLE => Ok(Kind::Copyable),
-        }
+        Ok(match SerializedKind::from_u8(byte)? {
+            SerializedKind::ALL => Kind::All,
+            SerializedKind::UNRESTRICTED => Kind::Unrestricted,
+            SerializedKind::RESOURCE => Kind::Resource,
+        })
     } else {
         Err(BinaryError::Malformed)
     }
@@ -720,12 +732,35 @@ fn load_struct_defs(
     let mut cursor = Cursor::new(&binary[start..end]);
     while cursor.position() < u64::from(table.count) {
         let struct_handle = read_uleb_u16_internal(&mut cursor)?;
-        let field_count = read_uleb_u16_internal(&mut cursor)?;
-        let fields = read_uleb_u16_internal(&mut cursor)?;
+        let field_information_flag = match cursor.read_u8() {
+            Ok(byte) => SerializedNativeStructFlag::from_u8(byte)?,
+            Err(_) => return Err(BinaryError::Malformed),
+        };
+        let field_information = match field_information_flag {
+            SerializedNativeStructFlag::NATIVE => {
+                let field_count = read_uleb_u16_internal(&mut cursor)?;
+                if field_count != 0 {
+                    return Err(BinaryError::Malformed);
+                }
+                let fields_u16 = read_uleb_u16_internal(&mut cursor)?;
+                if fields_u16 != 0 {
+                    return Err(BinaryError::Malformed);
+                }
+                StructFieldInformation::Native
+            }
+            SerializedNativeStructFlag::DECLARED => {
+                let field_count = read_uleb_u16_internal(&mut cursor)?;
+                let fields_u16 = read_uleb_u16_internal(&mut cursor)?;
+                let fields = FieldDefinitionIndex(fields_u16);
+                StructFieldInformation::Declared {
+                    field_count,
+                    fields,
+                }
+            }
+        };
         struct_defs.push(StructDefinition {
             struct_handle: StructHandleIndex(struct_handle),
-            field_count,
-            fields: FieldDefinitionIndex(fields),
+            field_information,
         });
     }
     Ok(())
@@ -774,12 +809,26 @@ fn load_function_def(cursor: &mut Cursor<&[u8]>) -> BinaryLoaderResult<FunctionD
     let function = read_uleb_u16_internal(cursor)?;
 
     let flags = cursor.read_u8().map_err(|_| BinaryError::Malformed)?;
+    let acquires_global_resources = load_struct_definition_indices(cursor)?;
     let code_unit = load_code_unit(cursor)?;
     Ok(FunctionDefinition {
         function: FunctionHandleIndex(function),
         flags,
+        acquires_global_resources,
         code: code_unit,
     })
+}
+
+/// Deserializes a `Vec<StructDefinitionIndex>`.
+fn load_struct_definition_indices(
+    cursor: &mut Cursor<&[u8]>,
+) -> BinaryLoaderResult<Vec<StructDefinitionIndex>> {
+    let len = cursor.read_u8().map_err(|_| BinaryError::Malformed)?;
+    let mut indices = vec![];
+    for _ in 0..len {
+        indices.push(StructDefinitionIndex(read_uleb_u16_internal(cursor)?));
+    }
+    Ok(indices)
 }
 
 /// Deserializes a `CodeUnit`.
@@ -843,11 +892,11 @@ fn load_code(cursor: &mut Cursor<&[u8]>, code: &mut Vec<Bytecode>) -> BinaryLoad
                 let idx = cursor.read_u8().map_err(|_| BinaryError::Malformed)?;
                 Bytecode::StLoc(idx)
             }
-            Opcodes::LD_REF_LOC => {
+            Opcodes::BORROW_LOC => {
                 let idx = cursor.read_u8().map_err(|_| BinaryError::Malformed)?;
                 Bytecode::BorrowLoc(idx)
             }
-            Opcodes::LD_REF_FIELD => {
+            Opcodes::BORROW_FIELD => {
                 let idx = read_uleb_u16_internal(cursor)?;
                 Bytecode::BorrowField(FieldDefinitionIndex(idx))
             }
@@ -899,7 +948,7 @@ fn load_code(cursor: &mut Cursor<&[u8]>, code: &mut Vec<Bytecode>) -> BinaryLoad
                 let types_idx = read_uleb_u16_internal(cursor)?;
                 Bytecode::Exists(StructDefinitionIndex(idx), LocalsSignatureIndex(types_idx))
             }
-            Opcodes::BORROW_REF => {
+            Opcodes::BORROW_GLOBAL => {
                 let idx = read_uleb_u16_internal(cursor)?;
                 let types_idx = read_uleb_u16_internal(cursor)?;
                 Bytecode::BorrowGlobal(StructDefinitionIndex(idx), LocalsSignatureIndex(types_idx))
@@ -1006,11 +1055,32 @@ impl SerializedType {
     }
 }
 
+impl SerializedNominalResourceFlag {
+    fn from_u8(value: u8) -> BinaryLoaderResult<SerializedNominalResourceFlag> {
+        match value {
+            0x1 => Ok(SerializedNominalResourceFlag::NOMINAL_RESOURCE),
+            0x2 => Ok(SerializedNominalResourceFlag::NORMAL_STRUCT),
+            _ => Err(BinaryError::UnknownSerializedType),
+        }
+    }
+}
+
 impl SerializedKind {
     fn from_u8(value: u8) -> BinaryLoaderResult<SerializedKind> {
         match value {
-            0x1 => Ok(SerializedKind::RESOURCE),
-            0x2 => Ok(SerializedKind::COPYABLE),
+            0x1 => Ok(SerializedKind::ALL),
+            0x2 => Ok(SerializedKind::UNRESTRICTED),
+            0x3 => Ok(SerializedKind::RESOURCE),
+            _ => Err(BinaryError::UnknownSerializedType),
+        }
+    }
+}
+
+impl SerializedNativeStructFlag {
+    fn from_u8(value: u8) -> BinaryLoaderResult<SerializedNativeStructFlag> {
+        match value {
+            0x1 => Ok(SerializedNativeStructFlag::NATIVE),
+            0x2 => Ok(SerializedNativeStructFlag::DECLARED),
             _ => Err(BinaryError::UnknownSerializedType),
         }
     }
@@ -1032,8 +1102,8 @@ impl Opcodes {
             0x0B => Ok(Opcodes::COPY_LOC),
             0x0C => Ok(Opcodes::MOVE_LOC),
             0x0D => Ok(Opcodes::ST_LOC),
-            0x0E => Ok(Opcodes::LD_REF_LOC),
-            0x0F => Ok(Opcodes::LD_REF_FIELD),
+            0x0E => Ok(Opcodes::BORROW_LOC),
+            0x0F => Ok(Opcodes::BORROW_FIELD),
             0x10 => Ok(Opcodes::LD_BYTEARRAY),
             0x11 => Ok(Opcodes::CALL),
             0x12 => Ok(Opcodes::PACK),
@@ -1063,7 +1133,7 @@ impl Opcodes {
             0x2A => Ok(Opcodes::GET_GAS_REMAINING),
             0x2B => Ok(Opcodes::GET_TXN_SENDER),
             0x2C => Ok(Opcodes::EXISTS),
-            0x2D => Ok(Opcodes::BORROW_REF),
+            0x2D => Ok(Opcodes::BORROW_GLOBAL),
             0x2E => Ok(Opcodes::RELEASE_REF),
             0x2F => Ok(Opcodes::MOVE_FROM),
             0x30 => Ok(Opcodes::MOVE_TO),

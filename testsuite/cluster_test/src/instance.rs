@@ -7,15 +7,13 @@ use std::{
 
 #[derive(Clone)]
 pub struct Instance {
+    short_hash: String,
     ip: String,
 }
 
 impl Instance {
-    pub fn new<I>(ip: I) -> Instance
-    where
-        I: Into<String>,
-    {
-        Instance { ip: ip.into() }
+    pub fn new(short_hash: String, ip: String) -> Instance {
+        Instance { short_hash, ip }
     }
 
     pub fn run_cmd<I, S>(&self, args: I) -> failure::Result<()>
@@ -24,7 +22,12 @@ impl Instance {
         S: AsRef<OsStr>,
     {
         let ssh_dest = format!("ec2-user@{}", self.ip);
-        let ssh_args = vec!["-i", "/libra_rsa", ssh_dest.as_str()];
+        let ssh_args = vec![
+            "-i",
+            "/libra_rsa",
+            "-oStrictHostKeyChecking=no",
+            ssh_dest.as_str(),
+        ];
         let mut ssh_cmd = Command::new("ssh");
         ssh_cmd.args(ssh_args).args(args).stderr(Stdio::null());
         let status = ssh_cmd.status()?;
@@ -36,19 +39,13 @@ impl Instance {
         Ok(())
     }
 
-    pub fn check_ac_port(&self) -> bool {
-        let mut cmd = Command::new("nc");
-        cmd.args(vec!["-w", "1", "-z", self.ip.as_str(), "30307"]);
-        let status = cmd.status();
-        match status {
-            Err(..) => false,
-            Ok(exit_status) => exit_status.success(),
-        }
+    pub fn short_hash(&self) -> &String {
+        &self.short_hash
     }
 }
 
 impl fmt::Display for Instance {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.ip)
+        write!(f, "{}({})", self.short_hash, self.ip)
     }
 }

@@ -66,11 +66,15 @@ fn test_block_store_create_block() {
         a1_ref.id(),
         block_store.get_state_for_block(a1_ref.id()).unwrap(),
         a1_ref.round(),
+        a1_ref.quorum_cert().certified_parent_block_id(),
+        a1_ref.quorum_cert().certified_parent_block_round(),
+        a1_ref.quorum_cert().certified_grandparent_block_id(),
+        a1_ref.quorum_cert().certified_grandparent_block_round(),
         block_store.signer().author(),
         placeholder_ledger_info(),
         block_store.signer(),
     );
-    block_on(block_store.insert_vote_and_qc(vote_msg, 1));
+    block_store.insert_vote_and_qc(vote_msg, 1);
 
     let b1 = block_store.create_block(Arc::clone(&a1_ref), vec![2], 2, 2);
     assert_eq!(b1.parent_id(), a1_ref.id());
@@ -174,7 +178,7 @@ proptest! {
         let signer = ValidatorSigner::new(None, priv_key);
         let block_store = build_empty_tree_with_custom_signing(signer);
         for block in blocks {
-            if block.round() > 0 && authors.contains(&block.author()) {
+            if block.round() > 0 && authors.contains(&block.author().unwrap()) {
                 let known_parent = block_store.block_exists(block.parent_id());
                 let certified_parent = block.quorum_cert().certified_block_id() == block.parent_id();
                 let res = block_on(block_store.execute_and_insert_block(block.clone()));
@@ -207,57 +211,57 @@ proptest! {
 fn test_block_store_prune() {
     let (blocks, block_store) = build_simple_tree();
     // Attempt to prune genesis block (should be no-op)
-    assert_eq!(block_on(block_store.prune_tree(blocks[0].id())).len(), 0);
+    assert_eq!(block_store.prune_tree(blocks[0].id()).len(), 0);
     assert_eq!(block_store.len(), 7);
     assert_eq!(block_store.child_links(), block_store.len() - 1);
     assert_eq!(block_store.pruned_blocks_in_mem(), 0);
 
     let (blocks, block_store) = build_simple_tree();
     // Prune up to block A1
-    assert_eq!(block_on(block_store.prune_tree(blocks[1].id())).len(), 4);
+    assert_eq!(block_store.prune_tree(blocks[1].id()).len(), 4);
     assert_eq!(block_store.len(), 3);
     assert_eq!(block_store.child_links(), block_store.len() - 1);
     assert_eq!(block_store.pruned_blocks_in_mem(), 4);
 
     let (blocks, block_store) = build_simple_tree();
     // Prune up to block A2
-    assert_eq!(block_on(block_store.prune_tree(blocks[2].id())).len(), 5);
+    assert_eq!(block_store.prune_tree(blocks[2].id()).len(), 5);
     assert_eq!(block_store.len(), 2);
     assert_eq!(block_store.child_links(), block_store.len() - 1);
     assert_eq!(block_store.pruned_blocks_in_mem(), 5);
 
     let (blocks, block_store) = build_simple_tree();
     // Prune up to block A3
-    assert_eq!(block_on(block_store.prune_tree(blocks[3].id())).len(), 6);
+    assert_eq!(block_store.prune_tree(blocks[3].id()).len(), 6);
     assert_eq!(block_store.len(), 1);
     assert_eq!(block_store.child_links(), block_store.len() - 1);
 
     let (blocks, block_store) = build_simple_tree();
     // Prune up to block B1
-    assert_eq!(block_on(block_store.prune_tree(blocks[4].id())).len(), 4);
+    assert_eq!(block_store.prune_tree(blocks[4].id()).len(), 4);
     assert_eq!(block_store.len(), 3);
     assert_eq!(block_store.child_links(), block_store.len() - 1);
 
     let (blocks, block_store) = build_simple_tree();
     // Prune up to block B2
-    assert_eq!(block_on(block_store.prune_tree(blocks[5].id())).len(), 6);
+    assert_eq!(block_store.prune_tree(blocks[5].id()).len(), 6);
     assert_eq!(block_store.len(), 1);
     assert_eq!(block_store.child_links(), block_store.len() - 1);
 
     let (blocks, block_store) = build_simple_tree();
     // Prune up to block C1
-    assert_eq!(block_on(block_store.prune_tree(blocks[6].id())).len(), 6);
+    assert_eq!(block_store.prune_tree(blocks[6].id()).len(), 6);
     assert_eq!(block_store.len(), 1);
     assert_eq!(block_store.child_links(), block_store.len() - 1);
 
     // Prune the chain of Genesis -> B1 -> B2
     let (blocks, block_store) = build_simple_tree();
     // Prune up to block B1
-    assert_eq!(block_on(block_store.prune_tree(blocks[4].id())).len(), 4);
+    assert_eq!(block_store.prune_tree(blocks[4].id()).len(), 4);
     assert_eq!(block_store.len(), 3);
     assert_eq!(block_store.child_links(), block_store.len() - 1);
     // Prune up to block B2
-    assert_eq!(block_on(block_store.prune_tree(blocks[5].id())).len(), 2);
+    assert_eq!(block_store.prune_tree(blocks[5].id()).len(), 2);
     assert_eq!(block_store.len(), 1);
     assert_eq!(block_store.child_links(), block_store.len() - 1);
 }
@@ -279,7 +283,7 @@ fn test_block_tree_gc() {
     for (i, block) in added_blocks.iter().enumerate() {
         assert_eq!(block_store.len(), 100 - i);
         assert_eq!(block_store.pruned_blocks_in_mem(), min(i, 10));
-        block_on(block_store.prune_tree(block.id()));
+        block_store.prune_tree(block.id());
     }
 }
 
@@ -298,7 +302,7 @@ fn test_path_from_root() {
     );
     assert_eq!(block_store.path_from_root(genesis.clone()), Some(vec![]));
 
-    block_on(block_store.prune_tree(b2.id()));
+    block_store.prune_tree(b2.id());
 
     assert_eq!(
         block_store.path_from_root(b3.clone()),
@@ -339,17 +343,21 @@ fn test_insert_vote() {
             block.id(),
             block_store.get_state_for_block(block.id()).unwrap(),
             block.round(),
+            block.quorum_cert().certified_parent_block_id(),
+            block.quorum_cert().certified_parent_block_round(),
+            block.quorum_cert().certified_grandparent_block_id(),
+            block.quorum_cert().certified_grandparent_block_round(),
             voter.author(),
             placeholder_ledger_info(),
             voter,
         );
-        let vote_res = block_on(block_store.insert_vote_and_qc(vote_msg.clone(), qc_size));
+        let vote_res = block_store.insert_vote_and_qc(vote_msg.clone(), qc_size);
 
         // first vote of an author is accepted
         assert_eq!(vote_res, VoteReceptionResult::VoteAdded(i));
         // filter out duplicates
         assert_eq!(
-            block_on(block_store.insert_vote_and_qc(vote_msg, qc_size)),
+            block_store.insert_vote_and_qc(vote_msg, qc_size),
             VoteReceptionResult::DuplicateVote,
         );
         // qc is still not there
@@ -362,11 +370,15 @@ fn test_insert_vote() {
         block.id(),
         block_store.get_state_for_block(block.id()).unwrap(),
         block.round(),
+        block.quorum_cert().certified_parent_block_id(),
+        block.quorum_cert().certified_parent_block_round(),
+        block.quorum_cert().certified_grandparent_block_id(),
+        block.quorum_cert().certified_grandparent_block_round(),
         final_voter.author(),
         placeholder_ledger_info(),
         final_voter,
     );
-    match block_on(block_store.insert_vote_and_qc(vote_msg, qc_size)) {
+    match block_store.insert_vote_and_qc(vote_msg, qc_size) {
         VoteReceptionResult::NewQuorumCertificate(qc) => {
             assert_eq!(qc.certified_block_id(), block.id());
         }
@@ -425,15 +437,26 @@ fn test_need_fetch_for_qc() {
     let a1 = inserter.insert_block(genesis.as_ref(), 1);
     let a2 = inserter.insert_block(a1.as_ref(), 2);
     let a3 = inserter.insert_block(a2.as_ref(), 3);
-    block_on(block_tree.prune_tree(a2.id()));
+    block_tree.prune_tree(a2.id());
     let need_fetch_qc = placeholder_certificate_for_block(
         vec![block_tree.signer()],
         HashValue::zero(),
         a3.round() + 1,
+        HashValue::zero(),
+        a3.round(),
+        HashValue::zero(),
+        a3.round() - 1,
     );
     let too_old_qc = QuorumCert::certificate_for_genesis();
-    let can_insert_qc =
-        placeholder_certificate_for_block(vec![block_tree.signer()], a3.id(), a3.round());
+    let can_insert_qc = placeholder_certificate_for_block(
+        vec![block_tree.signer()],
+        a3.id(),
+        a3.round(),
+        a2.id(),
+        a2.round(),
+        a1.id(),
+        a1.round(),
+    );
     let duplicate_qc = block_tree.get_quorum_cert_for_block(a2.id()).unwrap();
     assert_eq!(
         block_tree.need_fetch_for_quorum_cert(&need_fetch_qc),
@@ -464,11 +487,15 @@ fn test_need_sync_for_qc() {
     let a1 = inserter.insert_block(genesis.as_ref(), 1);
     let a2 = inserter.insert_block(a1.as_ref(), 2);
     let a3 = inserter.insert_block(a2.as_ref(), 3);
-    block_on(block_tree.prune_tree(a3.id()));
+    block_tree.prune_tree(a3.id());
     let qc = placeholder_certificate_for_block(
         vec![block_tree.signer()],
         HashValue::zero(),
         a3.round() + 3,
+        HashValue::zero(),
+        a3.round() + 2,
+        HashValue::zero(),
+        a3.round() + 1,
     );
     assert_eq!(
         block_tree.need_sync_for_quorum_cert(HashValue::zero(), &qc),
@@ -478,6 +505,10 @@ fn test_need_sync_for_qc() {
         vec![block_tree.signer()],
         HashValue::zero(),
         a3.round() + 2,
+        HashValue::zero(),
+        a3.round() + 1,
+        HashValue::zero(),
+        a3.round(),
     );
     assert_eq!(
         block_tree.need_sync_for_quorum_cert(HashValue::zero(), &qc),

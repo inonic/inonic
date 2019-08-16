@@ -6,11 +6,11 @@ use crate::{
     utils,
 };
 use config::config::NodeConfig;
-use config_builder::swarm_config::{SwarmConfig, SwarmConfigBuilder};
-use crypto::signing::KeyPair;
+use config_builder::swarm_config::{LibraSwarmTopology, SwarmConfig, SwarmConfigBuilder};
 use debug_interface::NodeDebugClient;
 use failure::prelude::*;
 use logger::prelude::*;
+use nextgen_crypto::{ed25519::*, test_utils::KeyPair};
 use std::{
     collections::HashMap,
     env,
@@ -250,21 +250,24 @@ pub enum SwarmLaunchFailure {
 
 impl LibraSwarm {
     pub fn launch_swarm(
-        num_nodes: usize,
+        topology: LibraSwarmTopology,
         disable_logging: bool,
-        faucet_account_keypair: KeyPair,
+        faucet_account_keypair: KeyPair<Ed25519PrivateKey, Ed25519PublicKey>,
         tee_logs: bool,
         config_dir: Option<String>,
+        template_path: Option<String>,
     ) -> Self {
         let num_launch_attempts = 5;
         for i in 0..num_launch_attempts {
+            let swarm_config_dir = Self::setup_config_dir(&config_dir);
             info!("Launch swarm attempt: {} of {}", i, num_launch_attempts);
             match Self::launch_swarm_attempt(
-                num_nodes,
+                topology.clone(),
                 disable_logging,
                 faucet_account_keypair.clone(),
                 tee_logs,
-                &config_dir,
+                swarm_config_dir,
+                &template_path,
             ) {
                 Ok(swarm) => {
                     return swarm;
@@ -275,32 +278,48 @@ impl LibraSwarm {
         panic!("Max out {} attempts to launch swarm", num_launch_attempts);
     }
 
-    fn launch_swarm_attempt(
-        num_nodes: usize,
-        disable_logging: bool,
-        faucet_account_keypair: KeyPair,
-        tee_logs: bool,
-        config_dir: &Option<String>,
-    ) -> std::result::Result<Self, SwarmLaunchFailure> {
+    /// Either create a persistent directory for swarm or return a temporary one.
+    /// If specified persistent directory already exists,
+    /// assumably due to previous launch failure, it will be removed.
+    /// The directory for the last failed attempt won't be removed.
+    fn setup_config_dir(config_dir: &Option<String>) -> LibraSwarmDir {
         let dir = match config_dir {
             Some(dir_str) => {
+                let path_buf = PathBuf::from_str(&dir_str).expect("unable to create config dir");
+                if path_buf.exists() {
+                    std::fs::remove_dir_all(dir_str).expect("unable to delete previous config dir");
+                }
                 std::fs::create_dir_all(dir_str).expect("unable to create config dir");
-                LibraSwarmDir::Persistent(
-                    PathBuf::from_str(&dir_str).expect("unable to create config dir"),
-                )
+                LibraSwarmDir::Persistent(path_buf)
             }
             None => LibraSwarmDir::Temporary(
                 tempfile::tempdir().expect("unable to create temporary config dir"),
             ),
         };
-        let logs_dir_path = &dir.as_ref().join("logs");
         println!("Base directory containing logs and configs: {:?}", &dir);
+        dir
+    }
+
+    fn launch_swarm_attempt(
+        topology: LibraSwarmTopology,
+        disable_logging: bool,
+        faucet_account_keypair: KeyPair<Ed25519PrivateKey, Ed25519PublicKey>,
+        tee_logs: bool,
+        dir: LibraSwarmDir,
+        template_path: &Option<String>,
+    ) -> std::result::Result<Self, SwarmLaunchFailure> {
+        let logs_dir_path = dir.as_ref().join("logs");
         std::fs::create_dir(&logs_dir_path).unwrap();
-        let base = utils::workspace_root().join("config/data/configs/node.config.toml");
+        let base = utils::workspace_root().join(
+            template_path
+                .as_ref()
+                .unwrap_or(&"config/data/configs/node.config.toml".to_string()),
+        );
         let mut config_builder = SwarmConfigBuilder::new();
+
         config_builder
             .with_ipv4()
-            .with_nodes(num_nodes)
+            .with_topology(topology)
             .with_base(base)
             .with_output_dir(&dir)
             .with_faucet_keypair(faucet_account_keypair)
@@ -503,28 +522,25 @@ impl LibraSwarm {
     ) -> std::result::Result<(), SwarmLaunchFailure> {
         // First take the configs out to not keep immutable borrow on self when calling
         // `launch_node`.
-        let mut configs = vec![];
-        for (path, config) in self.config.get_configs() {
-            configs.push((path.clone(), config.clone()));
-        }
-        for (path, config) in configs {
-            if config.base.peer_id == peer_id {
-                return self.launch_node(peer_id, &path, &config, disable_logging);
-            }
-        }
-        panic!(
-            "PeerId {} not found in any of the admission control service ports.",
-            peer_id
-        );
+        self.launch_node(peer_id, disable_logging)
     }
 
     fn launch_node(
         &mut self,
         peer_id: String,
-        path: &PathBuf,
-        config: &NodeConfig,
         disable_logging: bool,
     ) -> std::result::Result<(), SwarmLaunchFailure> {
+        let (path, config) = self
+            .config
+            .get_configs()
+            .iter()
+            .find(|(_path, config)| config.base.peer_id == peer_id)
+            .expect(
+                &format!(
+                    "PeerId {} not found in any of the admission control service ports.",
+                    peer_id
+                )[..],
+            );
         let logs_dir_path = self.dir.as_ref().map(|x| x.as_ref().join("logs")).unwrap();
         let mut node =
             LibraNode::launch(config, path, &logs_dir_path, disable_logging, self.tee_logs)

@@ -1,15 +1,14 @@
 use std::str::FromStr;
 use std::collections::BTreeMap;
-use std::convert::TryFrom;
 use codespan::{ByteIndex, Span};
 
 use crate::ast::{ModuleDefinition, StructDefinition, Script, Program};
 use crate::ast::{
     FunctionAnnotation, FunctionBody, FunctionVisibility, ImportDefinition, ModuleName,
-    Kind, Block, Cmd, CopyableVal, Spanned,
+    Block, Cmd, CopyableVal, Spanned,
     Cmd_, Exp_, Exp, Var,  Var_, FunctionCall,
-    FunctionName, Builtin, Statement, IfElse, While, Loop, Type, Tag,  Field, Fields,
-    StructName, StructType, Function, BinOp, ModuleIdent, QualifiedModuleIdent, UnaryOp
+    FunctionName, Builtin, Statement, IfElse, While, Loop, Type, Field, Fields,
+    StructName, QualifiedStructIdent, Function, BinOp, ModuleIdent, QualifiedModuleIdent, UnaryOp
 };
 use types::{account_address::AccountAddress, byte_array::ByteArray};
 use hex;
@@ -21,30 +20,14 @@ Name: String = <s:r"[a-zA-Z$_][a-zA-Z0-9$_]*"> => s.to_string();
 DotName: String = <s:r"[a-zA-Z$_][a-zA-Z0-9$_]*\.[a-zA-Z$_][a-zA-Z0-9$_]*"> => s.to_string();
 
 ByteArray: ByteArray = {
-    <s:r#"b"[0-9a-fA-F]*""#> => {
+    <s:r#"h"[0-9a-fA-F]*""#> => {
         ByteArray::new(hex::decode(&s[2..s.len()-1]).unwrap_or_else(|_| panic!("The string {:?} is not a valid hex-encoded byte array", s)))
     }
 };
 AccountAddress: AccountAddress = {
     < s: r"0[xX][0-9a-fA-F]+" > => {
-        let mut hex_string = String::from(&s[2..]);
-        if hex_string.len() % 2 != 0 {
-            hex_string.insert(0, '0');
-        }
-
-        let mut result = hex::decode(hex_string.as_str()).unwrap();
-        let len = result.len();
-        if len < 32 {
-            result.reverse();
-            for i in len..32 {
-                result.push(0);
-            }
-            result.reverse();
-        }
-
-        assert!(result.len() >= 32);
-        AccountAddress::try_from(&result[..])
-            .unwrap_or_else(|_| panic!("The address {:?} is of invalid length. Addresses are at most 32-bytes long", result))
+        AccountAddress::from_hex_literal(&s)
+            .unwrap_or_else(|_| panic!("The address {:?} is of invalid length. Addresses are at most 32-bytes long", s))
     }
 };
 
@@ -202,13 +185,13 @@ StructName: StructName = {
     <n: Name> =>  StructName::new(n),
 }
 
-StructType : StructType = {
+QualifiedStructIdent : QualifiedStructIdent = {
     <module_dot_struct: DotName> => {
         let v: Vec<&str> = module_dot_struct.split(".").collect();
         assert!(v.len() == 2, 42);
         let m: ModuleName = ModuleName::new(v[0].to_string());
         let n: StructName = StructName::new(v[1].to_string());
-        StructType::new(m,n)
+        QualifiedStructIdent::new(m,n)
     }
 }
 
@@ -228,7 +211,6 @@ Builtin: Builtin = {
     "get_txn_public_key" => Builtin::GetTxnPublicKey,
     "get_txn_sender" => Builtin::GetTxnSender,
     "get_txn_sequence_number" => Builtin::GetTxnSequenceNumber,
-    "emit_event" => Builtin::EmitEvent,
     "move_from<" <t: StructName> ">" => Builtin::MoveFrom(t),
     "move_to_sender<" <t: StructName> ">" => Builtin::MoveToSender(t),
     "get_gas_remaining" => Builtin::GetGasRemaining,
@@ -349,7 +331,7 @@ Block : Block = {
 }
 
 Declaration: (Var_, Type) = {
-  "let" <v: Sp<Var>> ":" <t: RefAnnotation> ";" => (v, t),
+  "let" <v: Sp<Var>> ":" <t: Type> ";" => (v, t),
 }
 
 Declarations: Vec<(Var_, Type)> = {
@@ -360,32 +342,18 @@ FunctionBlock: (Vec<(Var_, Type)>, Block) = {
     "{" <locals: Declarations> <stmts: Statements> "}" => (locals, Block::new(stmts))
 }
 
-Kind : Kind = {
-    "R" => Kind::Resource,
-    "V" => Kind::Value,
-}
-
-Annotation : Type = {
-    "address" => Type::address(),
-    "u64" => Type::u64(),
-    "bool" => Type::bool(),
-    "bytearray" => Type::bytearray(),
-    <kind: Kind> "#" <c: StructType> => {
-        Type::Normal(
-            kind,
-            Tag::Struct(c),
-        )
-    },
-}
-
-RefAnnotation: Type = {
-    <annot: Annotation> => annot,
-    "&"<annot: Annotation> => Type::reference(false, annot),
-    "&mut "<annot: Annotation> => Type::reference(true, annot),
+Type: Type = {
+    "address" => Type::Address,
+    "u64" => Type::U64,
+    "bool" => Type::Bool,
+    "bytearray" => Type::ByteArray,
+    <s: QualifiedStructIdent> => Type::Struct(s),
+    "&" <t: Type> => Type::Reference(false, Box::new(t)),
+    "&mut " <t: Type> => Type::Reference(true, Box::new(t)),
 }
 
 ArgDecl : (Var, Type) = {
-    <v: Var> ":" <t: RefAnnotation> ","? => (v, t)
+    <v: Var> ":" <t: Type> ","? => (v, t)
 }
 
 NativeTag: () = {
@@ -402,7 +370,7 @@ FunctionAnnotation: FunctionAnnotation = {
 }
 
 ReturnType: Vec<Type> = {
-    ":" <t: RefAnnotation> <v: ("*" <RefAnnotation>)*> => {
+    ":" <t: Type> <v: ("*" <Type>)*> => {
         let mut v = v;
         v.insert(0, t);
         v
@@ -442,7 +410,7 @@ NativeFunctionDecl: (FunctionName, Function) = {
 }
 
 FieldDecl : (Field, Type) = {
-    <f: Field> ":" <t: Annotation> ","? => (f, t)
+    <f: Field> ":" <t: Type> ","? => (f, t)
 }
 
 StructKind: bool = {
@@ -501,13 +469,15 @@ pub Script : Script = {
 }
 
 StructDecl: StructDefinition = {
-    <kind: StructKind> <n: Name> "{" <data: (FieldDecl)*> "}" => {
+    <is_nominal_resource: StructKind> <n: Name> "{" <data: (FieldDecl)*> "}" => {
         let mut fields = Fields::new();
         for (field, type_) in data.into_iter() {
             fields.insert(field, type_);
         }
-        StructDefinition::new(kind, n, fields)
-    }
+        StructDefinition::move_declared(is_nominal_resource, n, fields)
+    },
+    <native: NativeTag> <is_nominal_resource: StructKind> <n: Name> ";" =>
+        StructDefinition::native(is_nominal_resource, n),
 }
 
 QualifiedModuleIdent: QualifiedModuleIdent = {

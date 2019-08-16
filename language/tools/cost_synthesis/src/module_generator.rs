@@ -17,13 +17,16 @@ use vm::{
     file_format::{
         AddressPoolIndex, Bytecode, CodeUnit, CompiledModule, CompiledModuleMut, FieldDefinition,
         FieldDefinitionIndex, FunctionDefinition, FunctionHandle, FunctionHandleIndex,
-        FunctionSignature, FunctionSignatureIndex, Kind, LocalsSignature, LocalsSignatureIndex,
+        FunctionSignature, FunctionSignatureIndex, LocalsSignature, LocalsSignatureIndex,
         MemberCount, ModuleHandle, ModuleHandleIndex, SignatureToken, StringPoolIndex,
-        StructDefinition, StructHandle, StructHandleIndex, TableIndex, TypeSignature,
-        TypeSignatureIndex,
+        StructDefinition, StructFieldInformation, StructHandle, StructHandleIndex, TableIndex,
+        TypeSignature, TypeSignatureIndex,
     },
     internals::ModuleIndex,
 };
+
+type BytecodeGenerator =
+    dyn Fn(&[SignatureToken], &FunctionSignature, usize, usize) -> Vec<Bytecode>;
 
 /// A wrapper around a `CompiledModule` containing information needed for generation.
 ///
@@ -46,17 +49,21 @@ pub struct ModuleBuilder {
     /// Other modules that we know, and that we can generate calls type references into. Indexed by
     /// their address and name (i.e. the module's `ModuleId`).
     known_modules: HashMap<ModuleId, CompiledModule>,
+
+    /// Bytecode generation for function bodies
+    bytecode_gen: Option<Box<BytecodeGenerator>>,
 }
 
 impl ModuleBuilder {
     /// Create a new module builder with generated module tables of size `table_size`.
-    pub fn new(table_size: TableIndex) -> Self {
+    pub fn new(table_size: TableIndex, bytecode_gen: Option<Box<BytecodeGenerator>>) -> Self {
         let seed: [u8; 32] = [0; 32];
         Self {
             gen: StdRng::from_seed(seed),
             module: Self::default_module_with_types(),
             table_size,
             known_modules: HashMap::new(),
+            bytecode_gen,
         }
     }
 
@@ -110,15 +117,29 @@ impl ModuleBuilder {
         self.module.function_defs = sigs
             .iter()
             .enumerate()
-            .map(|(i, _)| FunctionDefinition {
+            .map(|(i, sig)| FunctionDefinition {
                 function: FunctionHandleIndex::new(i as u16),
                 flags: CodeUnit::PUBLIC,
+                // TODO this needs to be generated
+                acquires_global_resources: vec![],
                 code: CodeUnit {
                     max_stack_size: 20,
                     locals: LocalsSignatureIndex(i as u16),
-                    // Random nonsense to pad this out. We won't look at this at all, just
-                    // non-empty is all that matters.
-                    code: vec![Bytecode::Sub, Bytecode::Sub, Bytecode::Add, Bytecode::Ret],
+                    code: {
+                        match &self.bytecode_gen {
+                            Some(bytecode_gen) => bytecode_gen(
+                                &sig.0,
+                                &sig.1,
+                                MIN_BYTECODE_INSTRUCTIONS,
+                                MAX_BYTECODE_INSTRUCTIONS,
+                            ),
+                            None => {
+                                // Random nonsense to pad this out. We won't look at this at all,
+                                // just non-empty is all that matters.
+                                vec![Bytecode::Sub, Bytecode::Sub, Bytecode::Add, Bytecode::Ret]
+                            }
+                        }
+                    },
                 },
             })
             .collect();
@@ -158,10 +179,13 @@ impl ModuleBuilder {
             // Generate the struct def. This generates pointers into the module's `field_defs` that
             // are not generated just yet -- we do this beforehand so that we can grab the starting
             // index into the module's `field_defs` table before we generate the struct's fields.
-            let struct_def = StructDefinition {
-                struct_handle: StructHandleIndex(struct_idx),
+            let field_information = StructFieldInformation::Declared {
                 field_count: num_fields as MemberCount,
                 fields: FieldDefinitionIndex::new(self.module.field_defs.len() as TableIndex),
+            };
+            let struct_def = StructDefinition {
+                struct_handle: StructHandleIndex(struct_idx),
+                field_information,
             };
             self.module.struct_defs.push(struct_def);
 
@@ -193,12 +217,8 @@ impl ModuleBuilder {
             .map(|struct_idx| StructHandle {
                 module: ModuleHandleIndex::new(0),
                 name: StringPoolIndex::new((struct_idx + offset) as TableIndex),
-                kind: if self.gen.gen_bool(1.0 / 2.0) {
-                    Kind::Resource
-                } else {
-                    Kind::Copyable
-                },
-                kind_constraints: vec![],
+                is_nominal_resource: self.gen.gen_bool(1.0 / 2.0),
+                type_parameters: vec![],
             })
             .collect();
     }
@@ -215,6 +235,7 @@ impl ModuleBuilder {
             .map(|_| {
                 let num_locals = self.gen.gen_range(1, MAX_NUM_LOCALS);
                 let num_args = self.gen.gen_range(1, MAX_FUNCTION_CALL_SIZE);
+                let num_return_types = self.gen.gen_range(1, MAX_RETURN_TYPES_LENGTH);
 
                 let locals = (0..num_locals)
                     .map(|_| {
@@ -230,13 +251,20 @@ impl ModuleBuilder {
                     })
                     .collect();
 
+                let return_types = (0..num_return_types)
+                    .map(|_| {
+                        let index = self.gen.gen_range(0, sig_toks.len());
+                        sig_toks[index].clone()
+                    })
+                    .collect();
+
                 // Generate the function signature. We don't care about the return type of the
                 // function, so we don't generate any types, and default to saying that it returns
                 // the unit type.
                 let function_sig = FunctionSignature {
                     arg_types: args,
-                    return_types: vec![],
-                    kind_constraints: vec![],
+                    return_types,
+                    type_parameters: vec![],
                 };
 
                 (locals, function_sig)
@@ -333,7 +361,7 @@ impl ModuleBuilder {
     /// This method builds and then materializes the underlying module skeleton. It then swaps in a
     /// new module skeleton, adds the generated module to the `known_modules`, and returns
     /// the generated module.
-    pub fn materialize(&mut self) -> VerifiedModule {
+    pub fn materialize_unverified(&mut self) -> CompiledModule {
         self.with_callee_modules();
         self.with_account_addresses();
         self.with_strings();
@@ -345,6 +373,14 @@ impl ModuleBuilder {
         self.known_modules.insert(module.self_id(), module.clone());
         // We don't expect the module to pass the verifier at the moment. This is OK because it
         // isn't part of the core code path, just something done to the side.
+        module
+    }
+
+    /// This method builds and then materializes the underlying module skeleton. It then swaps in a
+    /// new module skeleton, adds the generated module to the `known_modules`, and returns
+    /// the generated module as a Verified Module.
+    pub fn materialize(&mut self) -> VerifiedModule {
+        let module = self.materialize_unverified();
         VerifiedModule::bypass_verifier_DANGEROUS_FOR_TESTING_ONLY(module)
     }
 
@@ -376,7 +412,7 @@ impl ModuleGenerator {
     /// elements in each table, and where `iters` many modules are generated.
     pub fn new(table_size: TableIndex, iters: u64) -> Self {
         Self {
-            module_builder: ModuleBuilder::new(table_size),
+            module_builder: ModuleBuilder::new(table_size, None),
             iters,
         }
     }

@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::{
-    code_cache::module_cache::VMModuleCache, txn_executor::TransactionExecutor, value::Local,
-};
+use crate::{code_cache::module_cache::VMModuleCache, txn_executor::TransactionExecutor};
 use bytecode_verifier::{VerifiedModule, VerifiedScript};
+use nextgen_crypto::ed25519::compat;
 use std::collections::HashMap;
 use types::{access_path::AccessPath, account_address::AccountAddress, byte_array::ByteArray};
 use vm::{
@@ -19,6 +18,7 @@ use vm::{
     transaction_metadata::TransactionMetadata,
 };
 use vm_cache_map::Arena;
+use vm_runtime_types::value::Local;
 
 // Trait for the data cache to build a TransactionProcessor
 struct FakeDataCache {
@@ -45,6 +45,7 @@ fn fake_script() -> VerifiedScript {
         main: FunctionDefinition {
             function: FunctionHandleIndex::new(0),
             flags: CodeUnit::PUBLIC,
+            acquires_global_resources: vec![],
             code: CodeUnit {
                 max_stack_size: 10,
                 locals: LocalsSignatureIndex(0),
@@ -65,7 +66,7 @@ fn fake_script() -> VerifiedScript {
         function_signatures: vec![FunctionSignature {
             arg_types: vec![],
             return_types: vec![],
-            kind_constraints: vec![],
+            type_parameters: vec![],
         }],
         locals_signatures: vec![LocalsSignature(vec![])],
         string_pool: vec!["hello".to_string()],
@@ -554,6 +555,7 @@ fn fake_module_with_calls(sigs: Vec<(Vec<SignatureToken>, FunctionSignature)>) -
         .map(|(i, _)| FunctionDefinition {
             function: FunctionHandleIndex::new(i as u16),
             flags: CodeUnit::PUBLIC,
+            acquires_global_resources: vec![],
             code: CodeUnit {
                 max_stack_size: 10,
                 locals: LocalsSignatureIndex(i as u16),
@@ -608,7 +610,7 @@ fn test_call() {
             FunctionSignature {
                 arg_types: vec![],
                 return_types: vec![],
-                kind_constraints: vec![],
+                type_parameters: vec![],
             },
         ),
         // () -> (), two locals
@@ -617,7 +619,7 @@ fn test_call() {
             FunctionSignature {
                 arg_types: vec![],
                 return_types: vec![],
-                kind_constraints: vec![],
+                type_parameters: vec![],
             },
         ),
         // (Int, Int) -> (), two locals,
@@ -626,7 +628,7 @@ fn test_call() {
             FunctionSignature {
                 arg_types: vec![SignatureToken::U64, SignatureToken::U64],
                 return_types: vec![],
-                kind_constraints: vec![],
+                type_parameters: vec![],
             },
         ),
         // (Int, Int) -> (), three locals,
@@ -639,7 +641,7 @@ fn test_call() {
             FunctionSignature {
                 arg_types: vec![SignatureToken::U64, SignatureToken::U64],
                 return_types: vec![],
-                kind_constraints: vec![],
+                type_parameters: vec![],
             },
         ),
     ]);
@@ -711,7 +713,7 @@ fn test_transaction_info() {
     let entry_func = FunctionRef::new(&loaded_main, CompiledScript::MAIN_INDEX);
 
     let txn_info = {
-        let (_, public_key) = crypto::signing::generate_genesis_keypair();
+        let (_, public_key) = compat::generate_genesis_keypair();
         TransactionMetadata {
             sender: AccountAddress::default(),
             public_key,

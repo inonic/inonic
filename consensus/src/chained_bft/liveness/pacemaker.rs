@@ -3,7 +3,7 @@
 
 use crate::chained_bft::{
     common::Round,
-    liveness::timeout_msg::{PacemakerTimeout, PacemakerTimeoutCertificate},
+    consensus_types::timeout_msg::{PacemakerTimeout, PacemakerTimeoutCertificate},
 };
 use futures::Future;
 use std::{
@@ -64,12 +64,17 @@ pub trait Pacemaker: Send + Sync {
     /// Synchronous function to return the current round.
     fn current_round(&self) -> Round;
 
+    /// Return a optional reference to the highest timeout certificate (locally generated or
+    /// remotely received)
+    fn highest_timeout_certificate(&self) -> Option<PacemakerTimeoutCertificate>;
+
     /// Function to update current round based on received certificates.
     /// Both round of latest received QC and timeout certificates are taken into account.
     /// This function guarantees to update pacemaker state when promise that it returns is fulfilled
     fn process_certificates(
         &self,
         qc_round: Round,
+        highest_committed_round: Option<Round>,
         timeout_certificate: Option<&PacemakerTimeoutCertificate>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -78,7 +83,4 @@ pub trait Pacemaker: Send + Sync {
         &self,
         pacemaker_timeout: PacemakerTimeout,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-
-    /// Update the highest committed round
-    fn update_highest_committed_round(&self, highest_committed_round: Round);
 }

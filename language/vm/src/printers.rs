@@ -319,15 +319,23 @@ impl fmt::Display for CompiledModule {
         for struct_def in &inner.struct_defs {
             write!(f, "\n\t{{")?;
             display_struct_definition(struct_def, inner, f)?;
-            let f_start_idx = struct_def.fields;
-            let f_end_idx = f_start_idx.0 as u16 + struct_def.field_count;
-            for idx in f_start_idx.0 as u16..f_end_idx {
-                let field_def = match inner.field_defs.get(idx as usize) {
-                    None => panic!("bad field definition index {}", idx),
-                    Some(f) => f,
-                };
-                write!(f, "\n\t\t")?;
-                display_field_definition(field_def, inner, f)?;
+            match &struct_def.field_information {
+                StructFieldInformation::Native => write!(f, "native")?,
+                StructFieldInformation::Declared {
+                    field_count,
+                    fields,
+                } => {
+                    let f_start_idx = *fields;
+                    let f_end_idx = f_start_idx.0 as u16 + *field_count;
+                    for idx in f_start_idx.0 as u16..f_end_idx {
+                        let field_def = match inner.field_defs.get(idx as usize) {
+                            None => panic!("bad field definition index {}", idx),
+                            Some(f) => f,
+                        };
+                        write!(f, "\n\t\t")?;
+                        display_field_definition(field_def, inner, f)?;
+                    }
+                }
             }
             write!(f, "}},")?;
         }
@@ -401,9 +409,10 @@ fn display_struct_handle<T: TableAccess>(
     write!(
         f,
         "{} ",
-        match struct_.kind {
-            Kind::Resource => "resource",
-            Kind::Copyable => "struct",
+        if struct_.is_nominal_resource {
+            "resource"
+        } else {
+            "struct"
         }
     )?;
     write!(f, "{}@", tables.get_string_at(struct_.name).unwrap())?;

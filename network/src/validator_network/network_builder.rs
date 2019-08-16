@@ -21,14 +21,17 @@ use crate::{
     },
     validator_network::{
         ConsensusNetworkEvents, ConsensusNetworkSender, MempoolNetworkEvents, MempoolNetworkSender,
+        StateSynchronizerEvents, StateSynchronizerSender,
     },
     ProtocolId,
 };
 use channel;
-use crypto::x25519::{X25519PrivateKey, X25519PublicKey};
 use futures::{compat::Compat01As03, FutureExt, StreamExt, TryFutureExt};
 use netcore::{multiplexing::StreamMultiplexer, transport::boxed::BoxedTransport};
-use nextgen_crypto::ed25519::*;
+use nextgen_crypto::{
+    ed25519::*,
+    x25519::{X25519StaticPrivateKey, X25519StaticPublicKey},
+};
 use parity_multiaddr::Multiaddr;
 use std::{
     collections::HashMap,
@@ -53,6 +56,9 @@ pub const PING_FAILURES_TOLERATED: u64 = 10;
 pub const MAX_CONCURRENT_NETWORK_REQS: u32 = 100;
 pub const MAX_CONCURRENT_NETWORK_NOTIFS: u32 = 100;
 pub const MAX_CONNECTION_DELAY_MS: u64 = 10 * 60 * 1000 /* 10 minutes */;
+pub const CONSENSUS_INBOUND_MSG_TIMOUT_MS: u64 = 60 * 1000; // 1 minute
+pub const MEMPOOL_INBOUND_MSG_TIMOUT_MS: u64 = 60 * 1000; // 1 minute
+pub const STATE_SYNCHRONIZER_INBOUND_MSG_TIMOUT_MS: u64 = 60 * 1000; // 1 minute
 
 /// The type of the transport layer, i.e., running on memory or TCP stream,
 /// with or without Noise encryption
@@ -79,6 +85,7 @@ pub struct NetworkBuilder {
     channel_size: usize,
     mempool_protocols: Vec<ProtocolId>,
     consensus_protocols: Vec<ProtocolId>,
+    state_sync_protocols: Vec<ProtocolId>,
     direct_send_protocols: Vec<ProtocolId>,
     rpc_protocols: Vec<ProtocolId>,
     discovery_interval_ms: u64,
@@ -88,13 +95,16 @@ pub struct NetworkBuilder {
     ping_failures_tolerated: u64,
     connectivity_check_interval_ms: u64,
     inbound_rpc_timeout_ms: u64,
+    consensus_inbound_msg_timout_ms: u64,
+    mempool_inbound_msg_timout_ms: u64,
+    state_sync_inbound_msg_timeout_ms: u64,
     max_concurrent_outbound_rpcs: u32,
     max_concurrent_inbound_rpcs: u32,
     max_concurrent_network_reqs: u32,
     max_concurrent_network_notifs: u32,
     max_connection_delay_ms: u64,
     signing_keys: Option<(Ed25519PrivateKey, Ed25519PublicKey)>,
-    identity_keys: Option<(X25519PrivateKey, X25519PublicKey)>,
+    identity_keys: Option<(X25519StaticPrivateKey, X25519StaticPublicKey)>,
 }
 
 impl NetworkBuilder {
@@ -110,6 +120,7 @@ impl NetworkBuilder {
             channel_size: NETWORK_CHANNEL_SIZE,
             mempool_protocols: vec![],
             consensus_protocols: vec![],
+            state_sync_protocols: vec![],
             direct_send_protocols: vec![],
             rpc_protocols: vec![],
             transport: TransportType::Memory,
@@ -120,6 +131,9 @@ impl NetworkBuilder {
             ping_failures_tolerated: PING_FAILURES_TOLERATED,
             connectivity_check_interval_ms: CONNECTIVITY_CHECK_INTERNAL_MS,
             inbound_rpc_timeout_ms: INBOUND_RPC_TIMEOUT_MS,
+            consensus_inbound_msg_timout_ms: CONSENSUS_INBOUND_MSG_TIMOUT_MS,
+            mempool_inbound_msg_timout_ms: MEMPOOL_INBOUND_MSG_TIMOUT_MS,
+            state_sync_inbound_msg_timeout_ms: STATE_SYNCHRONIZER_INBOUND_MSG_TIMOUT_MS,
             max_concurrent_outbound_rpcs: MAX_CONCURRENT_OUTBOUND_RPCS,
             max_concurrent_inbound_rpcs: MAX_CONCURRENT_INBOUND_RPCS,
             max_concurrent_network_reqs: MAX_CONCURRENT_NETWORK_REQS,
@@ -158,7 +172,10 @@ impl NetworkBuilder {
     }
 
     /// Set identity keys of local node.
-    pub fn identity_keys(&mut self, keys: (X25519PrivateKey, X25519PublicKey)) -> &mut Self {
+    pub fn identity_keys(
+        &mut self,
+        keys: (X25519StaticPrivateKey, X25519StaticPublicKey),
+    ) -> &mut Self {
         self.identity_keys = Some(keys);
         self
     }
@@ -280,6 +297,12 @@ impl NetworkBuilder {
         self
     }
 
+    /// Set the protocol IDs that StateSynchronizer subscribes.
+    pub fn state_sync_protocols(&mut self, protocols: Vec<ProtocolId>) -> &mut Self {
+        self.state_sync_protocols = protocols;
+        self
+    }
+
     /// Set the protocol IDs that DirectSend actor subscribes.
     pub fn direct_send_protocols(&mut self, protocols: Vec<ProtocolId>) -> &mut Self {
         self.direct_send_protocols = protocols;
@@ -311,6 +334,7 @@ impl NetworkBuilder {
     ) -> (
         (MempoolNetworkSender, MempoolNetworkEvents),
         (ConsensusNetworkSender, ConsensusNetworkEvents),
+        (StateSynchronizerSender, StateSynchronizerEvents),
         Multiaddr,
     ) {
         let identity = Identity::new(self.peer_id, self.supported_protocols());
@@ -344,22 +368,35 @@ impl NetworkBuilder {
     ) -> (
         (MempoolNetworkSender, MempoolNetworkEvents),
         (ConsensusNetworkSender, ConsensusNetworkEvents),
+        (StateSynchronizerSender, StateSynchronizerEvents),
         Multiaddr,
     ) {
         // Construct Mempool and Consensus network interfaces
         let (network_reqs_tx, network_reqs_rx) =
             channel::new(self.channel_size, &counters::PENDING_NETWORK_REQUESTS);
-        let (mempool_tx, mempool_rx) =
-            channel::new(self.channel_size, &counters::PENDING_MEMPOOL_NETWORK_EVENTS);
-        let (consensus_tx, consensus_rx) = channel::new(
+        let (mempool_tx, mempool_rx) = channel::new_with_timeout(
+            self.channel_size,
+            &counters::PENDING_MEMPOOL_NETWORK_EVENTS,
+            Duration::from_millis(self.consensus_inbound_msg_timout_ms),
+        );
+        let (consensus_tx, consensus_rx) = channel::new_with_timeout(
             self.channel_size,
             &counters::PENDING_CONSENSUS_NETWORK_EVENTS,
+            Duration::from_millis(self.mempool_inbound_msg_timout_ms),
+        );
+        let (state_sync_tx, state_sync_rx) = channel::new_with_timeout(
+            self.channel_size,
+            &counters::PENDING_STATE_SYNCHRONIZER_NETWORK_EVENTS,
+            Duration::from_millis(self.state_sync_inbound_msg_timeout_ms),
         );
 
         let mempool_network_sender = MempoolNetworkSender::new(network_reqs_tx.clone());
         let mempool_network_events = MempoolNetworkEvents::new(mempool_rx);
         let consensus_network_sender = ConsensusNetworkSender::new(network_reqs_tx.clone());
         let consensus_network_events = ConsensusNetworkEvents::new(consensus_rx);
+        let state_sync_network_sender = StateSynchronizerSender::new(network_reqs_tx.clone());
+        let state_sync_network_events = StateSynchronizerEvents::new(state_sync_rx);
+
         // Initialize and start NetworkProvider.
         let (pm_reqs_tx, pm_reqs_rx) =
             channel::new(self.channel_size, &counters::PENDING_PEER_MANAGER_REQUESTS);
@@ -390,7 +427,15 @@ impl NetworkBuilder {
             .consensus_protocols
             .iter()
             .map(|p| (p.clone(), consensus_tx.clone()));
-        let upstream_handlers = mempool_handlers.chain(consensus_handlers).collect();
+
+        let state_sync_handlers = self
+            .state_sync_protocols
+            .iter()
+            .map(|p| (p.clone(), state_sync_tx.clone()));
+        let upstream_handlers = mempool_handlers
+            .chain(consensus_handlers)
+            .chain(state_sync_handlers)
+            .collect();
 
         let validator_network = NetworkProvider::new(
             pm_net_notifs_rx,
@@ -482,6 +527,7 @@ impl NetworkBuilder {
 
         // Initialize and start RPC actor.
         let rpc = Rpc::new(
+            self.executor.clone(),
             rpc_reqs_rx,
             pm_rpc_notifs_rx,
             PeerManagerRequestSender::new(pm_reqs_tx.clone()),
@@ -551,6 +597,7 @@ impl NetworkBuilder {
         (
             (mempool_network_sender, mempool_network_events),
             (consensus_network_sender, consensus_network_events),
+            (state_sync_network_sender, state_sync_network_events),
             listen_addr,
         )
     }

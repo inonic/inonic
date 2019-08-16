@@ -3,11 +3,11 @@
 
 use crate::{
     chained_bft::{
+        consensus_types::timeout_msg::PacemakerTimeout,
         liveness::{
             local_pacemaker::{ExponentialTimeInterval, LocalPacemaker, PacemakerTimeInterval},
             pacemaker::{NewRoundEvent, NewRoundReason, Pacemaker},
             pacemaker_timeout_manager::HighestTimeoutCertificates,
-            timeout_msg::PacemakerTimeout,
         },
         persistent_storage::PersistentStorage,
         test_utils::{consensus_runtime, MockStorage, TestPayload},
@@ -88,7 +88,7 @@ fn test_timeout_certificate() {
         // accumulated into single timeout certificate
         for round in 1..rounds {
             let signer = &signers[round - 1];
-            let pacemaker_timeout = PacemakerTimeout::new(round as u64, signer);
+            let pacemaker_timeout = PacemakerTimeout::new(round as u64, signer, None);
             pm.process_remote_timeout(pacemaker_timeout).await;
         }
         // Then timeout quorum for previous round (1,2,3) generates new round event for round 2
@@ -107,8 +107,8 @@ fn test_basic_qc() {
         // Wait for the initial event for the first round.
         expect_qc(1, &mut new_round_events_receiver).await;
 
-        pm.process_certificates(2, None).await;
-        pm.process_certificates(3, None).await;
+        pm.process_certificates(2, None, None).await;
+        pm.process_certificates(3, None, None).await;
 
         expect_qc(3, &mut new_round_events_receiver).await;
         expect_qc(4, &mut new_round_events_receiver).await;

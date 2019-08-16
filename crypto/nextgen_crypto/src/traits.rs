@@ -144,9 +144,6 @@ pub trait PublicKey: Sized + Clone + Eq + Hash +
     /// We require public / private types to be coupled, i.e. their
     /// associated type is each other.
     type PrivateKeyMaterial: PrivateKey<PublicKeyMaterial = Self>;
-    /// The length of the [`PublicKey`]
-    fn length() -> usize;
-
 }
 
 /// A type family of public keys that are used for signing.
@@ -239,4 +236,20 @@ pub trait Uniform {
 pub trait Genesis: PrivateKey {
     /// Produces the genesis private key.
     fn genesis() -> Self;
+}
+
+/// A type family for Diffie-Hellman private key material
+pub trait ExchangeKey:
+    PrivateKey<PublicKeyMaterial = <Self as ExchangeKey>::DHPublicKeyMaterial> + Uniform
+{
+    /// The associated PublicKey type
+    type DHPublicKeyMaterial: PublicKey<PrivateKeyMaterial = Self>;
+
+    /// The associated SharedKey type obtained as a result of the DH exchange
+    ///
+    /// Warning: This type may soon receive bounds for encryption & signing
+    type DHSharedKeyMaterial;
+
+    /// Generates a SharedKey using a peer PublicKey
+    fn dh(self, public_key: &Self::DHPublicKeyMaterial) -> Self::DHSharedKeyMaterial;
 }

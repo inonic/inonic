@@ -1,17 +1,16 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{chained_bft::QuorumCert, state_synchronizer::SyncStatus};
+use crate::chained_bft::QuorumCert;
 use canonical_serialization::{CanonicalSerialize, CanonicalSerializer};
 use crypto::{hash::ACCUMULATOR_PLACEHOLDER_HASH, HashValue};
 use failure::Result;
 use futures::Future;
+use nextgen_crypto::ed25519::*;
 use serde::{Deserialize, Serialize};
 use std::{pin::Pin, sync::Arc};
 use types::{
-    ledger_info::LedgerInfoWithSignatures,
-    transaction::{TransactionListWithProof, Version},
-    validator_set::ValidatorSet,
+    ledger_info::LedgerInfoWithSignatures, transaction::Version, validator_set::ValidatorSet,
 };
 
 /// A structure that specifies the result of the execution.
@@ -108,22 +107,10 @@ pub trait StateComputer: Send + Sync {
     /// Send a successful commit. A future is fulfilled when the state is finalized.
     fn commit(
         &self,
-        commit: LedgerInfoWithSignatures,
+        commit: LedgerInfoWithSignatures<Ed25519Signature>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
-    /// Synchronize to a commit that not present locally.
-    fn sync_to(
-        &self,
-        commit: QuorumCert,
-    ) -> Pin<Box<dyn Future<Output = Result<SyncStatus>> + Send>>;
-
-    /// Get a chunk of transactions as a batch
-    fn get_chunk(
-        &self,
-        start_version: u64,
-        target_version: u64,
-        batch_size: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<TransactionListWithProof>> + Send>>;
+    fn sync_to(&self, commit: QuorumCert) -> Pin<Box<dyn Future<Output = Result<bool>> + Send>>;
 }
 
 pub trait StateMachineReplication {

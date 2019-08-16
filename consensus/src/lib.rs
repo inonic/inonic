@@ -9,7 +9,7 @@
 
 #![deny(missing_docs)]
 #![feature(async_await)]
-#![recursion_limit = "128"]
+#![recursion_limit = "512"]
 #[macro_use]
 extern crate failure;
 
@@ -24,5 +24,4 @@ mod counters;
 
 mod state_computer;
 mod state_replication;
-mod state_synchronizer;
 mod txn_manager;

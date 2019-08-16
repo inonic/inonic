@@ -4,13 +4,49 @@
 //! Convenience structs and functions for generating configuration for a swarm of libra nodes
 use crate::util::gen_genesis_transaction;
 use config::{
-    config::{KeyPairs, NodeConfig, NodeConfigHelpers, VMPublishingOption},
+    config::{BaseConfig, KeyPairs, NodeConfig, NodeConfigHelpers, VMPublishingOption},
     seed_peers::{SeedPeersConfig, SeedPeersConfigHelpers},
     trusted_peers::{TrustedPeersConfig, TrustedPeersConfigHelpers},
 };
-use crypto::signing::KeyPair;
 use failure::prelude::*;
+use nextgen_crypto::{ed25519::*, test_utils::KeyPair};
 use std::path::{Path, PathBuf};
+
+/// Topology indicates the shape of the validator network
+/// Currently does not handle full nodes, the launch_swarm will only use num_nodes value
+#[derive(Debug, Clone)]
+pub struct LibraSwarmTopology {
+    // TODO: make it more general to support various network shapes
+    data: Vec<usize>,
+}
+
+impl LibraSwarmTopology {
+    pub fn create_validator_network(num_validator_nodes: usize) -> Self {
+        Self {
+            data: vec![num_validator_nodes],
+        }
+    }
+
+    pub fn create_uniform_network(num_validator_nodes: usize, num_full_nodes: usize) -> Self {
+        Self {
+            data: vec![num_validator_nodes, num_full_nodes],
+        }
+    }
+
+    pub fn num_validators(&self) -> usize {
+        if !self.data.is_empty() {
+            return self.data[0];
+        }
+        0
+    }
+
+    pub fn num_full_nodes(&self) -> usize {
+        if self.data.len() > 1 {
+            return self.data[1];
+        }
+        0
+    }
+}
 
 pub struct SwarmConfig {
     configs: Vec<(PathBuf, NodeConfig)>,
@@ -22,8 +58,8 @@ impl SwarmConfig {
     //TODO convert this to use the Builder paradigm
     pub fn new(
         mut template: NodeConfig,
-        num_nodes: usize,
-        faucet_key: KeyPair,
+        topology: &LibraSwarmTopology,
+        faucet_key: KeyPair<Ed25519PrivateKey, Ed25519PublicKey>,
         prune_seed_peers_for_discovery: bool,
         is_ipv4: bool,
         key_seed: Option<[u8; 32]>,
@@ -32,9 +68,11 @@ impl SwarmConfig {
     ) -> Result<Self> {
         // Generate trusted peer configs + their private keys.
         template.base.data_dir_path = output_dir.into();
-        let (peers_private_keys, trusted_peers_config) =
-            TrustedPeersConfigHelpers::get_test_config(num_nodes, key_seed);
-        trusted_peers_config.save_config(&output_dir.join(&template.base.trusted_peers_file));
+        let (mut peers_private_keys, trusted_peers_config) =
+            TrustedPeersConfigHelpers::get_test_config(topology.num_validators(), key_seed);
+        let trusted_peers_file = template.base.trusted_peers_file.clone();
+        let seed_peers_file = template.network.seed_peers_file.clone();
+        trusted_peers_config.save_config(&output_dir.join(&trusted_peers_file));
         let mut seed_peers_config = SeedPeersConfigHelpers::get_test_config_with_ipver(
             &trusted_peers_config,
             None,
@@ -50,11 +88,48 @@ impl SwarmConfig {
         let mut configs = Vec::new();
         // Generate configs for all nodes.
         for (node_id, addrs) in &seed_peers_config.seed_peers {
-            let mut config = template.clone();
+            let key_file_name = format!("{}.node.keys.toml", node_id.clone());
+
+            let base_config = BaseConfig::new(
+                node_id.clone(),
+                template.base.role.clone(),
+                KeyPairs::default(),
+                key_file_name.into(),
+                template.base.data_dir_path.clone(),
+                trusted_peers_file.clone(),
+                template.base.trusted_peers.clone(),
+                template.base.node_sync_retries,
+                template.base.node_sync_channel_buffer_size,
+                template.base.node_async_log_chan_size,
+            );
+            let mut config = NodeConfig {
+                base: base_config,
+                metrics: template.metrics.clone(),
+                execution: template.execution.clone(),
+                admission_control: template.admission_control.clone(),
+                debug_interface: template.debug_interface.clone(),
+                storage: template.storage.clone(),
+                network: template.network.clone(),
+                consensus: template.consensus.clone(),
+                mempool: template.mempool.clone(),
+                state_sync: template.state_sync.clone(),
+                log_collector: template.log_collector.clone(),
+                vm_config: template.vm_config.clone(),
+                secret_service: template.secret_service.clone(),
+            };
+
             config.base.peer_id = node_id.clone();
             // serialize keypairs on independent {node}.node.keys.toml file
             // this is because the peer_keypairs field is skipped during (de)serialization
-            let private_keys = peers_private_keys.get(node_id.as_str()).unwrap();
+            let private_keys = peers_private_keys
+                .remove_entry(node_id.as_str())
+                .expect(
+                    &format!(
+                        "Seed peer {} not present in peer private keys, aborting",
+                        node_id.as_str()
+                    )[..],
+                )
+                .1;
             let peer_keypairs = KeyPairs::load(private_keys);
             let key_file_name = format!("{}.node.keys.toml", config.base.peer_id);
 
@@ -83,7 +158,7 @@ impl SwarmConfig {
                 .take(1)
                 .collect();
         }
-        seed_peers_config.save_config(&output_dir.join(&template.network.seed_peers_file));
+        seed_peers_config.save_config(&output_dir.join(&seed_peers_file));
         let configs = configs
             .into_iter()
             .map(|config| {
@@ -99,14 +174,8 @@ impl SwarmConfig {
 
         Ok(Self {
             configs,
-            seed_peers: (
-                output_dir.join(template.network.seed_peers_file),
-                seed_peers_config,
-            ),
-            trusted_peers: (
-                output_dir.join(template.base.trusted_peers_file),
-                trusted_peers_config,
-            ),
+            seed_peers: (output_dir.join(seed_peers_file), seed_peers_config),
+            trusted_peers: (output_dir.join(trusted_peers_file), trusted_peers_config),
         })
     }
 
@@ -124,7 +193,7 @@ impl SwarmConfig {
 }
 
 pub struct SwarmConfigBuilder {
-    node_count: usize,
+    topology: LibraSwarmTopology,
     template_path: PathBuf,
     static_ports: bool,
     output_dir: PathBuf,
@@ -132,12 +201,12 @@ pub struct SwarmConfigBuilder {
     is_ipv4: bool,
     key_seed: Option<[u8; 32]>,
     faucet_account_keypair_filepath: Option<PathBuf>,
-    faucet_account_keypair: Option<KeyPair>,
+    faucet_account_keypair: Option<KeyPair<Ed25519PrivateKey, Ed25519PublicKey>>,
 }
 impl Default for SwarmConfigBuilder {
     fn default() -> Self {
         SwarmConfigBuilder {
-            node_count: 1,
+            topology: LibraSwarmTopology::create_validator_network(1),
             template_path: "config/data/configs/node.config.toml".into(),
             static_ports: false,
             output_dir: "configs".into(),
@@ -180,13 +249,16 @@ impl SwarmConfigBuilder {
         self
     }
 
-    pub fn with_faucet_keypair(&mut self, keypair: KeyPair) -> &mut Self {
+    pub fn with_faucet_keypair(
+        &mut self,
+        keypair: KeyPair<Ed25519PrivateKey, Ed25519PublicKey>,
+    ) -> &mut Self {
         self.faucet_account_keypair = Some(keypair);
         self
     }
 
-    pub fn with_nodes(&mut self, n: usize) -> &mut Self {
-        self.node_count = n;
+    pub fn with_topology(&mut self, topology: LibraSwarmTopology) -> &mut Self {
+        self.topology = topology;
         self
     }
 
@@ -210,11 +282,10 @@ impl SwarmConfigBuilder {
         self
     }
 
-    pub fn build(&self) -> Result<SwarmConfig> {
+    pub fn build(&mut self) -> Result<SwarmConfig> {
         // verify required fields
         let faucet_key_path = self.faucet_account_keypair_filepath.clone();
-        let faucet_key_option = self.faucet_account_keypair.clone();
-        let faucet_key = faucet_key_option.unwrap_or_else(|| {
+        let faucet_key = self.faucet_account_keypair.take().unwrap_or_else(|| {
             generate_keypair::load_key_from_file(
                 faucet_key_path.expect("Must provide faucet key file"),
             )
@@ -254,7 +325,7 @@ impl SwarmConfigBuilder {
 
         SwarmConfig::new(
             template,
-            self.node_count,
+            &self.topology,
             faucet_key,
             self.force_discovery,
             self.is_ipv4,

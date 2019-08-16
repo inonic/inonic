@@ -5,7 +5,6 @@ use crate::{
     chained_bft::QuorumCert,
     counters,
     state_replication::{StateComputeResult, StateComputer},
-    state_synchronizer::{StateSynchronizer, SyncStatus},
 };
 use crypto::HashValue;
 use execution_proto::proto::{
@@ -13,23 +12,26 @@ use execution_proto::proto::{
     execution_grpc::ExecutionClient,
 };
 use failure::Result;
-use futures::{compat::Future01CompatExt, Future, FutureExt};
+use futures::{compat::Future01CompatExt, future, Future, FutureExt};
+use logger::prelude::*;
+use nextgen_crypto::ed25519::*;
 use proto_conv::{FromProto, IntoProto};
+use state_synchronizer::StateSyncClient;
 use std::{pin::Pin, sync::Arc, time::Instant};
 use types::{
     ledger_info::LedgerInfoWithSignatures,
-    transaction::{SignedTransaction, TransactionListWithProof, TransactionStatus},
+    transaction::{SignedTransaction, TransactionStatus},
 };
 
 /// Basic communication with the Execution module;
 /// implements StateComputer traits.
 pub struct ExecutionProxy {
     execution: Arc<ExecutionClient>,
-    synchronizer: Arc<StateSynchronizer>,
+    synchronizer: Arc<StateSyncClient>,
 }
 
 impl ExecutionProxy {
-    pub fn new(execution: Arc<ExecutionClient>, synchronizer: Arc<StateSynchronizer>) -> Self {
+    pub fn new(execution: Arc<ExecutionClient>, synchronizer: Arc<StateSyncClient>) -> Self {
         Self {
             execution: Arc::clone(&execution),
             synchronizer,
@@ -111,20 +113,22 @@ impl StateComputer for ExecutionProxy {
                 }
                     .boxed()
             }
-            Err(e) => async move { Err(e.into()) }.boxed(),
+            Err(e) => future::err(e.into()).boxed(),
         }
     }
 
     /// Send a successful commit. A future is fulfilled when the state is finalized.
     fn commit(
         &self,
-        commit: LedgerInfoWithSignatures,
+        commit: LedgerInfoWithSignatures<Ed25519Signature>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-        counters::LAST_COMMITTED_VERSION.set(commit.ledger_info().version() as i64);
+        let version = commit.ledger_info().version();
+        counters::LAST_COMMITTED_VERSION.set(version as i64);
         let mut commit_req = CommitBlockRequest::new();
         commit_req.set_ledger_info_with_sigs(commit.into_proto());
 
         let pre_commit_instant = Instant::now();
+        let synchronizer = Arc::clone(&self.synchronizer);
         match self.execution.commit_block_async(&commit_req) {
             Ok(receiver) => {
                 // convert from grpcio enum to failure::Error
@@ -135,6 +139,9 @@ impl StateComputer for ExecutionProxy {
                                 let commit_duration_ms = pre_commit_instant.elapsed().as_millis();
                                 counters::BLOCK_COMMIT_DURATION_MS
                                     .observe(commit_duration_ms as f64);
+                                if let Err(e) = synchronizer.commit(version).await {
+                                    error!("failed to notify state synchronizer: {:?}", e);
+                                }
                                 Ok(())
                             } else {
                                 Err(grpcio::Error::RpcFailure(grpcio::RpcStatus::new(
@@ -149,27 +156,15 @@ impl StateComputer for ExecutionProxy {
                 }
                     .boxed()
             }
-            Err(e) => async move { Err(e.into()) }.boxed(),
+            Err(e) => future::err(e.into()).boxed(),
         }
     }
 
     /// Synchronize to a commit that not present locally.
-    fn sync_to(
-        &self,
-        commit: QuorumCert,
-    ) -> Pin<Box<dyn Future<Output = Result<SyncStatus>> + Send>> {
+    fn sync_to(&self, commit: QuorumCert) -> Pin<Box<dyn Future<Output = Result<bool>> + Send>> {
         counters::STATE_SYNC_COUNT.inc();
-        self.synchronizer.sync_to(commit).boxed()
-    }
-
-    fn get_chunk(
-        &self,
-        start_version: u64,
-        target_version: u64,
-        batch_size: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<TransactionListWithProof>> + Send>> {
         self.synchronizer
-            .get_chunk(start_version, target_version, batch_size)
+            .sync_to(commit.ledger_info().clone())
             .boxed()
     }
 }

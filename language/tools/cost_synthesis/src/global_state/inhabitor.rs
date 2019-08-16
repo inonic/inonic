@@ -10,12 +10,11 @@ use vm::{
     access::*,
     file_format::{
         MemberCount, ModuleHandle, SignatureToken, StructDefinition, StructDefinitionIndex,
-        StructHandleIndex, TableIndex,
+        StructFieldInformation, StructHandleIndex, TableIndex,
     },
 };
-use vm_runtime::{
-    code_cache::module_cache::ModuleCache, loaded_data::loaded_module::LoadedModule, value::*,
-};
+use vm_runtime::{code_cache::module_cache::ModuleCache, loaded_data::loaded_module::LoadedModule};
+use vm_runtime_types::value::*;
 
 /// A wrapper around state that is used to generate random valid inhabitants for types.
 pub struct RandomInhabitor<'alloc, 'txn>
@@ -161,8 +160,15 @@ where
                 let struct_definition = self
                     .root_module
                     .struct_def_at(self.resolve_struct_handle(*struct_handle_idx).2);
-                let num_fields = struct_definition.field_count as usize;
-                let index = struct_definition.fields;
+                let (num_fields, index) = match struct_definition.field_information {
+                    StructFieldInformation::Native => {
+                        panic!("[Struct Generation] Unexpected native struct")
+                    }
+                    StructFieldInformation::Declared {
+                        field_count,
+                        fields,
+                    } => (field_count as usize, fields),
+                };
                 let fields = self
                     .root_module
                     .field_def_range(num_fields as MemberCount, index);

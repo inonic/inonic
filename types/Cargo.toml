@@ -17,14 +17,13 @@ lazy_static = "1.3.0"
 logger = { path = "../common/logger" }
 proptest = "0.9"
 proptest-derive = "0.1.0"
-protobuf = "2.7"
+protobuf = "~2.7"
 radix_trie = "0.1.3"
 rand = "0.6.5"
 serde = { version = "1.0.96", features = ["derive"] }
-serde_json = "1.0.40"
 tiny-keccak = "1.5.0"
 
-canonical_serialization = { path = "../common/canonical_serialization"}
+canonical_serialization = { path = "../common/canonical_serialization" }
 crypto = { path = "../crypto/legacy_crypto" }
 nextgen_crypto = { path = "../crypto/nextgen_crypto" }
 failure = { path = "../common/failure_ext", package = "failure_ext" }
@@ -34,9 +33,8 @@ proto_conv = { path = "../common/proto_conv", features = ["derive"] }
 [build-dependencies]
 build_helpers = { path = "../common/build_helpers" }
 
-[dev-dependencies.nextgen_crypto]
-features = ["testing"]
-path = "../crypto/nextgen_crypto"
+[dev-dependencies]
+nextgen_crypto = { path = "../crypto/nextgen_crypto", features = ["testing"] }
 
 [features]
 default = []

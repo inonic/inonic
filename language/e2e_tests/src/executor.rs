@@ -17,10 +17,10 @@ use types::{
     write_set::WriteSet,
 };
 use vm::CompiledModule;
-use vm_runtime::{
+use vm_runtime::{MoveVM, VMExecutor, VMVerifier};
+use vm_runtime_types::{
     loaded_data::{struct_def::StructDef, types::Type},
     value::Value,
-    MoveVM, VMExecutor, VMVerifier,
 };
 
 /// Provides an environment to run a VM instance.
@@ -148,11 +148,17 @@ impl FakeExecutor {
         let int_type = Type::U64;
         let byte_array_type = Type::ByteArray;
         let coin = Type::Struct(StructDef::new(vec![int_type.clone()]));
+        let event_handle = Type::Struct(StructDef::new(vec![
+            int_type.clone(),
+            byte_array_type.clone(),
+        ]));
+
         StructDef::new(vec![
             byte_array_type,
             coin,
-            int_type.clone(),
-            int_type.clone(),
+            Type::Bool,
+            event_handle.clone(),
+            event_handle.clone(),
             int_type.clone(),
         ])
     }

@@ -9,12 +9,13 @@ use crate::{
     executor::FakeExecutor,
 };
 use lazy_static::lazy_static;
+use nextgen_crypto::ed25519::compat;
 use types::{account_address::AccountAddress, transaction::SignedTransaction};
 
 /// The gas each transaction is configured to reserve. If the gas available in the account,
 /// converted to microlibra, falls below this threshold, transactions are expected to fail with
 /// an insufficient balance.
-pub const TXN_RESERVED: u64 = 100_000;
+pub const TXN_RESERVED: u64 = 140_000;
 
 lazy_static! {
     /// The gas cost of a create-account transaction.
@@ -130,8 +131,8 @@ lazy_static! {
         let mut executor = FakeExecutor::from_genesis_file();
         let sender = AccountData::new(1_000_000, 10);
         executor.add_account_data(&sender);
-        let (_privkey, pubkey) = crypto::signing::generate_keypair();
-        let new_key_hash = AccountAddress::from(pubkey);
+        let (_privkey, pubkey) = compat::generate_keypair(None);
+        let new_key_hash = AccountAddress::from_public_key(&pubkey);
 
          let txn = rotate_key_txn(sender.account(), new_key_hash, 10);
          compute_gas_used(txn, &mut executor)

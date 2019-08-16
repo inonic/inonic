@@ -2,18 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Loaded representation for Move modules.
 
-use crate::loaded_data::{function::FunctionDef, struct_def::StructDef};
+use crate::loaded_data::function::FunctionDef;
 use bytecode_verifier::VerifiedModule;
 use std::{collections::HashMap, sync::RwLock};
 use vm::{
     access::ModuleAccess,
     errors::VMInvariantViolation,
     file_format::{
-        CompiledModule, FieldDefinitionIndex, FunctionDefinitionIndex, MemberCount,
-        StructDefinitionIndex, TableIndex,
+        CompiledModule, FieldDefinitionIndex, FunctionDefinitionIndex, StructDefinitionIndex,
+        StructFieldInformation, TableIndex,
     },
     internals::ModuleIndex,
 };
+use vm_runtime_types::loaded_data::struct_def::StructDef;
 
 /// Defines a loaded module in the memory. Currently we just store module itself with a bunch of
 /// reverse mapping that allows querying definition of struct/function by name.
@@ -78,8 +79,14 @@ impl LoadedModule {
             let sd_idx = StructDefinitionIndex::new(idx as TableIndex);
             struct_defs_table.insert(name, sd_idx);
 
-            for i in 0..struct_def.field_count {
-                field_offsets[struct_def.fields.into_index() + i as usize] = i;
+            if let StructFieldInformation::Declared {
+                field_count,
+                fields,
+            } = &struct_def.field_information
+            {
+                for i in 0..*field_count {
+                    field_offsets[fields.into_index() + i as usize] = i;
+                }
             }
         }
         for (idx, field_def) in module.field_defs().iter().enumerate() {
@@ -104,10 +111,6 @@ impl LoadedModule {
             field_offsets,
             cache,
         }
-    }
-
-    pub fn field_count_at(&self, idx: StructDefinitionIndex) -> MemberCount {
-        self.struct_def_at(idx).field_count
     }
 
     /// Return a cached copy of the struct def at this index, if available.

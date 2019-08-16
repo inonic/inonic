@@ -9,10 +9,10 @@ use crate::{
 use chrono::Utc;
 use crypto::{
     hash::{CryptoHash, TestOnlyHash},
-    signing::{sign_message, KeyPair},
     HashValue,
 };
 use failure::prelude::*;
+use nextgen_crypto::{ed25519::*, test_utils::KeyPair, traits::SigningKey};
 use proto_conv::IntoProto;
 use protobuf::Message;
 
@@ -24,6 +24,24 @@ pub fn get_signed_transactions_digest(signed_txns: &[ProtoSignedTransaction]) ->
         signatures.extend_from_slice(&transaction.sender_signature);
     }
     signatures.test_only_hash()
+}
+
+pub fn create_unsigned_txn(
+    program: Program,
+    sender_address: AccountAddress,
+    sender_sequence_number: u64,
+    max_gas_amount: u64,
+    gas_unit_price: u64,
+    txn_expiration: i64, // for compatibility with UTC's timestamp.
+) -> RawTransaction {
+    RawTransaction::new(
+        sender_address,
+        sender_sequence_number,
+        program,
+        max_gas_amount,
+        gas_unit_price,
+        std::time::Duration::new((Utc::now().timestamp() + txn_expiration) as u64, 0),
+    )
 }
 
 pub trait TransactionSigner {
@@ -40,25 +58,25 @@ pub fn create_signed_txn<T: TransactionSigner + ?Sized>(
     gas_unit_price: u64,
     txn_expiration: i64, // for compatibility with UTC's timestamp.
 ) -> Result<SignedTransaction> {
-    let raw_txn = RawTransaction::new(
+    let raw_txn = create_unsigned_txn(
+        program,
         sender_address,
         sender_sequence_number,
-        program,
         max_gas_amount,
         gas_unit_price,
-        std::time::Duration::new((Utc::now().timestamp() + txn_expiration) as u64, 0),
+        txn_expiration,
     );
     signer.sign_txn(raw_txn)
 }
 
-impl TransactionSigner for KeyPair {
+impl TransactionSigner for KeyPair<Ed25519PrivateKey, Ed25519PublicKey> {
     fn sign_txn(&self, raw_txn: RawTransaction) -> failure::prelude::Result<SignedTransaction> {
         let bytes = raw_txn.clone().into_proto().write_to_bytes()?;
         let hash = RawTransactionBytes(&bytes).hash();
-        let signature = sign_message(hash, self.private_key())?;
+        let signature = self.private_key.sign_message(&hash);
         Ok(SignedTransaction::craft_signed_transaction_for_client(
             raw_txn,
-            self.public_key(),
+            self.public_key.clone(),
             signature,
         ))
     }

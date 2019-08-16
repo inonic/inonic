@@ -5,14 +5,17 @@
 
 use crate::language_storage::ModuleId;
 use failure::prelude::*;
+#[cfg(any(test, feature = "testing"))]
 use proptest::{collection::vec, prelude::*};
+#[cfg(any(test, feature = "testing"))]
 use proptest_derive::Arbitrary;
 use proto_conv::{FromProto, IntoProto};
 
 // We want conversions here so that we don't need to be dealing with the unknown default values
 // that we want in the protobuf.
-#[derive(Arbitrary, Clone, PartialEq, Eq, Debug, Hash)]
-#[proptest(no_params)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
+#[cfg_attr(any(test, feature = "testing"), proptest(no_params))]
 pub enum VMValidationStatus {
     InvalidSignature,
     InvalidAuthKey,
@@ -33,10 +36,12 @@ pub enum VMValidationStatus {
 }
 
 // TODO: Add string parameters to all the other types as well
-#[derive(Arbitrary, Clone, PartialEq, Eq, Debug, Hash)]
-#[proptest(no_params)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
+#[cfg_attr(any(test, feature = "testing"), proptest(no_params))]
 pub enum VMVerificationError {
     IndexOutOfBounds(String),
+    CodeUnitIndexOutOfBounds(String),
     RangeOutOfBounds(String),
     NoModuleHandles(String),
     ModuleAddressDoesNotMatchSender(String),
@@ -96,6 +101,7 @@ pub enum VMVerificationError {
     BooleanOpTypeMismatchError(String),
     EqualityOpTypeMismatchError(String),
     ExistsResourceTypeMismatchError(String),
+    ExistsNoResourceError(String),
     BorrowGlobalTypeMismatchError(String),
     BorrowGlobalNoResourceError(String),
     MoveFromTypeMismatchError(String),
@@ -103,10 +109,12 @@ pub enum VMVerificationError {
     MoveToSenderTypeMismatchError(String),
     MoveToSenderNoResourceError(String),
     CreateAccountTypeMismatchError(String),
+    GlobalReferenceError(String),
 }
 
-#[derive(Arbitrary, Clone, PartialEq, Eq, Debug, Hash)]
-#[proptest(no_params)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
+#[cfg_attr(any(test, feature = "testing"), proptest(no_params))]
 pub enum VMVerificationStatus {
     /// Verification error in a transaction script.
     Script(VMVerificationError),
@@ -117,7 +125,8 @@ pub enum VMVerificationStatus {
     Dependency(ModuleId, VMVerificationError),
 }
 
-#[derive(Arbitrary, Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
 pub enum VMInvariantViolationError {
     OutOfBoundsIndex,
     OutOfBoundsRange,
@@ -128,9 +137,11 @@ pub enum VMInvariantViolationError {
     LocalReferenceError,
     StorageError,
     InternalTypeError,
+    EventKeyMismatch,
 }
 
-#[derive(Arbitrary, Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
 pub enum BinaryError {
     Malformed,
     BadMagic,
@@ -144,7 +155,8 @@ pub enum BinaryError {
     DuplicateTable,
 }
 
-#[derive(Arbitrary, Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
 pub enum DynamicReferenceErrorType {
     MoveOfBorrowedResource,
     GlobalRefAlreadyReleased,
@@ -152,14 +164,16 @@ pub enum DynamicReferenceErrorType {
     GlobalAlreadyBorrowed,
 }
 
-#[derive(Arbitrary, Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
 pub enum ArithmeticErrorType {
     Underflow,
     Overflow,
     DivisionByZero,
 }
 
-#[derive(Arbitrary, Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
 pub enum ExecutionStatus {
     Executed,
     OutOfGas,
@@ -181,8 +195,9 @@ pub enum ExecutionStatus {
     DuplicateModuleName,
 }
 
-#[derive(Arbitrary, Clone, PartialEq, Eq, Debug, Hash)]
-#[proptest(no_params)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(any(test, feature = "testing"), derive(Arbitrary))]
+#[cfg_attr(any(test, feature = "testing"), proptest(no_params))]
 pub enum VMStatus {
     Validation(VMValidationStatus),
     InvariantViolation(VMInvariantViolationError),
@@ -201,8 +216,11 @@ pub enum VMStatus {
     //
     // Also reduce the size of the vector because VMVerificationStatus is slow to generate
     // for the exact same reason.
-    #[proptest(
-        strategy = "vec(any::<VMVerificationStatus>(), 0..16).prop_map(VMStatus::Verification)"
+    #[cfg_attr(
+        any(test, feature = "testing"),
+        proptest(
+            strategy = "vec(any::<VMVerificationStatus>(), 0..16).prop_map(VMStatus::Verification)"
+        )
     )]
     Verification(Vec<VMVerificationStatus>),
 }
@@ -358,6 +376,9 @@ impl IntoProto for VMVerificationError {
         match self {
             VMVerificationError::IndexOutOfBounds(message) => {
                 (ProtoKind::IndexOutOfBounds, message)
+            }
+            VMVerificationError::CodeUnitIndexOutOfBounds(message) => {
+                (ProtoKind::CodeUnitIndexOutOfBounds, message)
             }
             VMVerificationError::RangeOutOfBounds(message) => {
                 (ProtoKind::RangeOutOfBounds, message)
@@ -524,6 +545,9 @@ impl IntoProto for VMVerificationError {
             VMVerificationError::ExistsResourceTypeMismatchError(message) => {
                 (ProtoKind::ExistsResourceTypeMismatchError, message)
             }
+            VMVerificationError::ExistsNoResourceError(message) => {
+                (ProtoKind::ExistsNoResourceError, message)
+            }
             VMVerificationError::BorrowGlobalTypeMismatchError(message) => {
                 (ProtoKind::BorrowGlobalTypeMismatchError, message)
             }
@@ -545,6 +569,9 @@ impl IntoProto for VMVerificationError {
             VMVerificationError::CreateAccountTypeMismatchError(message) => {
                 (ProtoKind::CreateAccountTypeMismatchError, message)
             }
+            VMVerificationError::GlobalReferenceError(message) => {
+                (ProtoKind::GlobalReferenceError, message)
+            }
         }
     }
 }
@@ -558,6 +585,9 @@ impl FromProto for VMVerificationError {
         let (kind, message) = proto_verification_error;
         match kind {
             ProtoKind::IndexOutOfBounds => Ok(VMVerificationError::IndexOutOfBounds(message)),
+            ProtoKind::CodeUnitIndexOutOfBounds => {
+                Ok(VMVerificationError::CodeUnitIndexOutOfBounds(message))
+            }
             ProtoKind::RangeOutOfBounds => Ok(VMVerificationError::RangeOutOfBounds(message)),
             ProtoKind::NoModuleHandles => Ok(VMVerificationError::NoModuleHandles(message)),
             ProtoKind::ModuleAddressDoesNotMatchSender => Ok(
@@ -701,6 +731,9 @@ impl FromProto for VMVerificationError {
             ProtoKind::ExistsResourceTypeMismatchError => Ok(
                 VMVerificationError::ExistsResourceTypeMismatchError(message),
             ),
+            ProtoKind::ExistsNoResourceError => {
+                Ok(VMVerificationError::ExistsNoResourceError(message))
+            }
             ProtoKind::BorrowGlobalTypeMismatchError => {
                 Ok(VMVerificationError::BorrowGlobalTypeMismatchError(message))
             }
@@ -721,6 +754,9 @@ impl FromProto for VMVerificationError {
             }
             ProtoKind::CreateAccountTypeMismatchError => {
                 Ok(VMVerificationError::CreateAccountTypeMismatchError(message))
+            }
+            ProtoKind::GlobalReferenceError => {
+                Ok(VMVerificationError::GlobalReferenceError(message))
             }
             ProtoKind::UnknownVerificationError => {
                 bail_err!(DecodingError::UnknownVerificationErrorEncountered)
@@ -802,6 +838,7 @@ impl IntoProto for VMInvariantViolationError {
             VMInvariantViolationError::LocalReferenceError => ProtoStatus::LocalReferenceError,
             VMInvariantViolationError::StorageError => ProtoStatus::StorageError,
             VMInvariantViolationError::InternalTypeError => ProtoStatus::InternalTypeError,
+            VMInvariantViolationError::EventKeyMismatch => ProtoStatus::EventKeyMismatch,
         }
     }
 }
@@ -821,6 +858,7 @@ impl FromProto for VMInvariantViolationError {
             ProtoError::LocalReferenceError => Ok(VMInvariantViolationError::LocalReferenceError),
             ProtoError::StorageError => Ok(VMInvariantViolationError::StorageError),
             ProtoError::InternalTypeError => Ok(VMInvariantViolationError::InternalTypeError),
+            ProtoError::EventKeyMismatch => Ok(VMInvariantViolationError::EventKeyMismatch),
             ProtoError::UnknownInvariantViolationError => {
                 bail_err!(DecodingError::UnknownInvariantViolationErrorEncountered)
             }
